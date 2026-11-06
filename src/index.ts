@@ -15,6 +15,8 @@ import {
   appendBoundedLog,
   DEFAULT_CATEGORY_PREFERENCES,
   DEFAULT_CIRCUIT_BREAKER,
+  deleteContactFromLocalFeedback,
+  deleteLocalFeedbackEntry,
   loadArticleFeedback,
   loadArticleReports,
   loadBoundedLogs,
@@ -55,6 +57,7 @@ import {
   evaluatePowerTier,
   formatSourceTimestamp,
   getArticleCategoryKeys,
+  getEditorialStateBadgeMeta,
   getVerificationBadgeMeta,
   prioritizeArticlesByPreferences,
   recordFailureAndAdvanceCircuit,
@@ -98,6 +101,10 @@ interface AppState {
   feedbackSelectedType: ArticleIssueType;
   feedbackNotice: string | null;
   feedbackError: string | null;
+  generalFeedbackNotice: string | null;
+  generalFeedbackError: string | null;
+  lastFeedbackSubmittedAtMs: number | null;
+  seenIdempotencyTokens: Set<string>;
   spatialKioskExpanded: boolean;
 }
 
@@ -138,6 +145,10 @@ const state: AppState = {
   feedbackSelectedType: 'inaccuracy',
   feedbackNotice: null,
   feedbackError: null,
+  generalFeedbackNotice: null,
+  generalFeedbackError: null,
+  lastFeedbackSubmittedAtMs: null,
+  seenIdempotencyTokens: new Set<string>(),
   spatialKioskExpanded: false,
 };
 
@@ -318,8 +329,15 @@ function renderArticleCard(item: ArticleRecord, lang: LanguageCode, isStale: boo
   const title = isHi ? item.titleHi : item.title;
   const publisher = isHi ? item.publisherHi : item.publisher;
   const category = isHi ? item.categoryHi : item.category;
-  const summary = isHi ? item.permittedSummaryHi : item.permittedSummary;
   const badge = getVerificationBadgeMeta(item.verificationStatus, lang);
+  const edBadge = getEditorialStateBadgeMeta(item.editorialState, lang);
+  const isBlocked = badge.status === 'blocked' || Boolean(item.sourceUrlWithheld) || item.rightsStatus === 'blocked';
+  const isWarningStatus = badge.status !== 'verified' || item.editorialState !== 'active';
+  const summary = isBlocked ? null : isHi ? item.permittedSummaryHi : item.permittedSummary;
+  const reasonText =
+    (isHi ? item.verificationReasonHi || item.verificationReason : item.verificationReason) ||
+    (isHi ? badge.descriptionHi : badge.descriptionEn);
+
   const matchedPrefs = getArticleCategoryKeys(item).filter((k) =>
     state.categoryPrefs.selectedCategories.includes(k)
   );
@@ -338,22 +356,43 @@ function renderArticleCard(item: ArticleRecord, lang: LanguageCode, isStale: boo
           : 'National Fallback';
 
   return `
-    <article class="article-card" data-test-fixture="${Boolean(item.isTestFixture)}" data-article-id="${item.id}">
+    <article
+      class="article-card"
+      data-test-fixture="${Boolean(item.isTestFixture)}"
+      data-verification-status="${badge.status}"
+      data-editorial-state="${item.editorialState ?? 'active'}"
+      data-article-id="${item.id}"
+    >
       <div>
+        <!-- Spec v3 Page 7 Item 2: Source: [publisher] right next to Source verification: [status] and before the timestamp -->
         <div class="article-kicker-meta" style="display:flex; flex-wrap:wrap; align-items:center; gap:6px;">
           <strong>${scopeLabel}</strong>
           <span aria-hidden="true">·</span>
           <span>${category}</span>
           <span aria-hidden="true">·</span>
-          <span>${isHi ? 'स्रोत:' : 'Source:'} <strong>${publisher}</strong></span>
+          <span>Source: <strong>${publisher}</strong></span>
           <span
             class="verification-badge"
             data-verification="${badge.status}"
             data-testid="source-verification-badge"
             title="${isHi ? badge.descriptionHi : badge.descriptionEn}"
           >
-            ${badge.displayLabel}
+            Source verification: ${badge.displayLabel}
           </span>
+          ${
+            item.editorialState && item.editorialState !== 'active'
+              ? `<span
+                  class="verification-badge"
+                  data-editorial-state="${item.editorialState}"
+                  data-testid="editorial-state-badge"
+                  title="${isHi ? edBadge.descriptionHi : edBadge.descriptionEn}"
+                >
+                  Editorial: ${edBadge.displayLabel}
+                </span>`
+              : ''
+          }
+          <span aria-hidden="true">·</span>
+          <span>${formatSourceTimestamp(item.publishedAt, lang)}</span>
           <span aria-hidden="true">·</span>
           <span>Rights: ${item.rightsStatus}</span>
           ${
@@ -377,6 +416,23 @@ function renderArticleCard(item: ArticleRecord, lang: LanguageCode, isStale: boo
           }
         </div>
 
+        ${
+          isWarningStatus
+            ? `<div style="margin-top:8px; padding:6px 10px; border-radius:6px; border:1px solid ${
+                isBlocked ? 'rgba(248,113,113,0.55)' : 'rgba(251,191,36,0.55)'
+              }; background:${
+                isBlocked ? 'rgba(248,113,113,0.1)' : 'rgba(245,158,11,0.1)'
+              }; font-size:0.78rem; color:var(--text-secondary);">
+                <strong>${
+                  isHi
+                    ? 'चेतावनी / स्थिति रिकॉर्ड (Warning / Status Record — सामान्य सत्यापित समाचार नहीं):'
+                    : 'Warning / Status Record (Not an ordinary current verified story):'
+                }</strong>
+                <span> ${reasonText}</span>
+              </div>`
+            : ''
+        }
+
         <h3 class="article-headline" style="margin-top:10px;">
           <a href="/article/${item.id}" data-nav="/article/${item.id}" style="color:inherit; text-decoration:none;">
             ${title}
@@ -386,7 +442,15 @@ function renderArticleCard(item: ArticleRecord, lang: LanguageCode, isStale: boo
         ${
           summary
             ? `<p class="article-summary" style="margin-top:8px;">${summary}</p>`
-            : ''
+            : isBlocked
+              ? `<p class="article-summary" style="margin-top:8px; color:var(--text-muted); font-style:italic;" data-testid="blocked-withheld-body-notice">
+                  ${
+                    isHi
+                      ? 'अवरुद्ध (Blocked) स्रोत: कोई स्क्रैप किया गया पाठ, मीडिया या असुरक्षित बाहरी लिंक प्रदर्शित नहीं किया गया है।'
+                      : 'Blocked record: no scraped body, media, or unsafe external URL is displayed.'
+                  }
+                </p>`
+              : ''
         }
 
         ${
@@ -419,28 +483,46 @@ function renderArticleCard(item: ArticleRecord, lang: LanguageCode, isStale: boo
             ${formatSourceTimestamp(item.fetchedAt, lang)}
           </div>
           <div>
-            ${isHi ? 'स्रोत सत्यापन स्थिति (Verification Status):' : 'Source Verification Status:'}
+            ${isHi ? 'स्रोत सत्यापन स्थिति (Source verification):' : 'Source verification:'}
             <strong>${badge.labelEn}</strong> (${badge.displayLabel})
           </div>
         </div>
 
         <div class="article-actions" style="margin-top:12px;">
-          <a
-            href="${item.sourceUrl}"
-            target="_blank"
-            rel="noopener noreferrer"
-            class="ext-link-btn"
-          >
-            ${isHi ? `मूल स्रोत खोलें (${publisher}) ↗` : `Open Original Source (${publisher}) ↗`}
-          </a>
+          ${
+            isBlocked || !item.sourceUrl
+              ? `<span class="withheld-link-notice" data-testid="withheld-unsafe-link-notice">
+                  ⛔ ${
+                    isHi
+                      ? 'असुरक्षित / अनुमत-रहित बाहरी लिंक रोका गया (Withheld)'
+                      : 'Unsafe / Unpermitted External URL Withheld'
+                  }
+                </span>`
+              : `<a
+                  href="${item.sourceUrl}"
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  class="ext-link-btn"
+                >
+                  ${isHi ? `मूल स्रोत खोलें (${publisher}) ↗` : `Open Original Source (${publisher}) ↗`}
+                </a>`
+          }
           <a
             href="/article/${item.id}"
             data-nav="/article/${item.id}"
             class="nav-link-btn"
             style="border:1px solid var(--border-subtle);"
           >
-            ${isHi ? 'विवरण, रिपोर्ट एवं प्रतिक्रिया' : 'Details, Report & Feedback'}
+            ${isHi ? 'विवरण एवं सत्यापन देखें' : 'Article Detail & Attribution'}
           </a>
+          <button
+            type="button"
+            class="btn-quiet card-report-issue-btn"
+            data-report-article-id="${item.id}"
+            style="min-height:44px; padding:8px 12px; font-size:0.8rem;"
+          >
+            🚩 ${isHi ? 'समस्या रिपोर्ट करें (Report Issue)' : 'Report Article Issue'}
+          </button>
         </div>
       </div>
     </article>
@@ -694,10 +776,13 @@ function renderHomeOrScopePage(
           ${isHi ? '✓ सत्यापित (Verified)' : '✓ Verified'}
         </span>
         <span class="verification-badge" data-verification="pending">
-          ${isHi ? '⏳ सत्यापन लंबित (Pending Verification)' : '⏳ Pending Verification'}
+          ${isHi ? '⏳ लंबित (Pending)' : '⏳ Pending'}
         </span>
-        <span class="verification-badge" data-verification="retracted">
-          ${isHi ? '⚠ वापस लिया गया (Retracted)' : '⚠ Retracted'}
+        <span class="verification-badge" data-verification="blocked">
+          ${isHi ? '⛔ अवरुद्ध (Blocked)' : '⛔ Blocked'}
+        </span>
+        <span class="verification-badge" data-editorial-state="retracted">
+          ${isHi ? 'Editorial: ⚠ वापस लिया गया (Retracted)' : 'Editorial: ⚠ Retracted'}
         </span>
       </div>
     </section>
@@ -841,10 +926,20 @@ function renderHomeOrScopePage(
 
 function renderArticleDetailPage(articleId: string, allItems: ArticleRecord[]): string {
   const isHi = state.lang === 'hi';
-  const item =
-    allItems.find((a) => a.id === articleId) ||
-    STAGE1_OFFICIAL_LINK_ENVELOPE.items.find((a) => a.id === articleId) ||
-    TEST_FIXTURE_ENVELOPE.items.find((a) => a.id === articleId);
+  let item = allItems.find((a) => a.id === articleId);
+  if (!item) {
+    const validatedStage1 = validateFeedEnvelope(STAGE1_OFFICIAL_LINK_ENVELOPE, SOURCE_ALLOWLIST_LEDGER, {
+      isProduction: true,
+      referenceNowIso: '2026-11-06T06:00:00Z',
+    }).acceptedItems;
+    const validatedFixtures = validateFeedEnvelope(TEST_FIXTURE_ENVELOPE, SOURCE_ALLOWLIST_LEDGER, {
+      isProduction: false,
+      referenceNowIso: '2026-11-06T06:00:00Z',
+    }).acceptedItems;
+    item =
+      validatedStage1.find((a) => a.id === articleId) ||
+      validatedFixtures.find((a) => a.id === articleId);
+  }
 
   if (!item) {
     return renderNotFoundPage(`/article/${articleId}`);
@@ -852,8 +947,14 @@ function renderArticleDetailPage(articleId: string, allItems: ArticleRecord[]): 
 
   const title = isHi ? item.titleHi : item.title;
   const publisher = isHi ? item.publisherHi : item.publisher;
-  const summary = isHi ? item.permittedSummaryHi : item.permittedSummary;
   const badge = getVerificationBadgeMeta(item.verificationStatus, state.lang);
+  const edBadge = getEditorialStateBadgeMeta(item.editorialState, state.lang);
+  const isBlocked =
+    badge.status === 'blocked' || Boolean(item.sourceUrlWithheld) || item.rightsStatus === 'blocked';
+  const summary = isBlocked ? null : isHi ? item.permittedSummaryHi : item.permittedSummary;
+  const verReason =
+    (isHi ? item.verificationReasonHi || item.verificationReason : item.verificationReason) ||
+    (isHi ? badge.descriptionHi : badge.descriptionEn);
   const articleReports = loadArticleReports().filter((r) => r.articleId === item.id);
   const articleFeedbackList = loadArticleFeedback().filter((f) => f.articleId === item.id);
 
@@ -880,26 +981,55 @@ function renderArticleDetailPage(articleId: string, allItems: ArticleRecord[]): 
           <span aria-hidden="true">·</span>
           <span>${isHi ? item.categoryHi : item.category}</span>
           <span aria-hidden="true">·</span>
-          <span>Publisher: <strong>${publisher}</strong></span>
+          <span>Source: <strong>${publisher}</strong></span>
           <span
             class="verification-badge"
             data-verification="${badge.status}"
             data-testid="detail-source-verification-badge"
             title="${isHi ? badge.descriptionHi : badge.descriptionEn}"
           >
-            ${badge.displayLabel}
+            Source verification: ${badge.displayLabel}
           </span>
+          ${
+            item.editorialState && item.editorialState !== 'active'
+              ? `<span
+                  class="verification-badge"
+                  data-editorial-state="${item.editorialState}"
+                  data-testid="detail-editorial-state-badge"
+                  title="${isHi ? edBadge.descriptionHi : edBadge.descriptionEn}"
+                >
+                  Editorial: ${edBadge.displayLabel}
+                </span>`
+              : ''
+          }
           <span aria-hidden="true">·</span>
           <span>Rights Status: <strong>${item.rightsStatus}</strong></span>
         </div>
 
         <h1 class="section-title" style="margin-top:8px;">${title}</h1>
 
+        <!-- Spec v3 Page 7 Item 3: Source verification, verificationCheckedAt, verificationReason, and Scope-Honesty Note -->
         <div class="article-timestamps" style="margin-top:12px;">
           <div>
-            <strong>${isHi ? 'स्रोत सत्यापन स्थिति (Verification Status):' : 'Source Verification Status:'}</strong>
-            <span>${badge.labelEn} — ${isHi ? badge.descriptionHi : badge.descriptionEn}</span>
+            <strong>${isHi ? 'स्रोत सत्यापन स्थिति (Source verification):' : 'Source verification:'}</strong>
+            <span><strong>${badge.labelEn}</strong> (${badge.displayLabel})</span>
           </div>
+          <div>
+            <strong>${isHi ? 'सत्यापन जांच समय (verificationCheckedAt):' : 'Verification Checked At (verificationCheckedAt):'}</strong>
+            <span>${formatSourceTimestamp(item.verificationCheckedAt || item.verifiedAt || item.fetchedAt, state.lang)}</span>
+          </div>
+          <div>
+            <strong>${isHi ? 'सत्यापन कारण (verificationReason):' : 'Verification Reason (verificationReason):'}</strong>
+            <span>${verReason}</span>
+          </div>
+          ${
+            item.editorialState && item.editorialState !== 'active'
+              ? `<div>
+                  <strong>${isHi ? 'संपादकीय स्थिति (editorialState):' : 'Editorial State (editorialState):'}</strong>
+                  <span style="color:var(--status-danger); font-weight:700;">${edBadge.labelEn} (${edBadge.displayLabel})</span>
+                </div>`
+              : ''
+          }
           <div>
             <strong>${isHi ? 'स्रोत प्रकाशन समय (Source Published At):' : 'Source Publication Time:'}</strong>
             ${formatSourceTimestamp(item.publishedAt, state.lang)} (${item.timezone})
@@ -909,29 +1039,54 @@ function renderArticleDetailPage(articleId: string, allItems: ArticleRecord[]): 
             ${formatSourceTimestamp(item.fetchedAt, state.lang)}
           </div>
           <div>
-            <strong>${isHi ? 'सत्यापन समय (Verified At):' : 'Verified At:'}</strong>
-            ${formatSourceTimestamp(item.verifiedAt, state.lang)}
-          </div>
-          <div>
             <strong>${isHi ? 'कैननिकल स्रोत URL:' : 'Canonical Source URL:'}</strong>
-            <span style="word-break:break-all;">${item.sourceUrl}</span>
+            <span style="word-break:break-all;">${
+              isBlocked || !item.sourceUrl
+                ? isHi
+                  ? 'अवरुद्ध / असुरक्षित लिंक रोका गया (Withheld — Not Clickable)'
+                  : 'Withheld (Unsafe or Unpermitted Source URL Blocked)'
+                : item.sourceUrl
+            }</span>
           </div>
+        </div>
+
+        <div
+          style="margin-top:12px; padding:10px 14px; border-radius:6px; border:1px solid var(--border-amber); background:rgba(251, 191, 36, 0.08); font-size:0.84rem; color:var(--text-primary);"
+          data-testid="scope-honesty-note"
+        >
+          <strong>${isHi ? 'सत्यापन सीमा स्पष्टीकरण (Scope-Honesty Note):' : 'Verification Scope Note:'}</strong>
+          <span>
+            This is the source verification status recorded for the item, not a guarantee that every fact is true.
+            ${
+              isHi
+                ? ' (यह आइटम के लिए दर्ज की गई स्रोत सत्यापन स्थिति है, न कि इस बात की गारंटी कि प्रत्येक तथ्य पूर्णतः सत्य है।)'
+                : ''
+            }
+          </span>
         </div>
 
         <div class="state-banner" style="margin-top:14px;">
           <h2 style="margin:0 0 6px; font-size:1.05rem; font-family:var(--font-serif);">
             ${
-              isHi
-                ? 'अनुमत सारांश एवं अधिकार सूचना (Permitted Summary & Rights Notice)'
-                : 'Permitted Summary & Rights-Safe Attribution'
+              isBlocked
+                ? isHi
+                  ? 'अवरुद्ध स्रोत सूचना (Blocked Source — Content & Link Withheld)'
+                  : 'Blocked Source Notice (Content & Unsafe Link Withheld)'
+                : isHi
+                  ? 'अनुमत सारांश एवं अधिकार सूचना (Permitted Summary & Rights Notice)'
+                  : 'Permitted Summary & Rights-Safe Attribution'
             }
           </h2>
-          <p class="article-summary">
+          <p class="article-summary" data-testid="detail-summary-paragraph">
             ${
-              summary ||
-              (isHi
-                ? 'कोई अनुमत सारांश उपलब्ध नहीं है। पूर्ण सामग्री के लिए नीचे दिए गए आधिकारिक स्रोत लिंक पर जाएं।'
-                : 'No permitted summary extract. Visit the canonical source link below.')
+              isBlocked
+                ? isHi
+                  ? `अवरुद्ध (Blocked): इस आइटम का कोई भी स्क्रैप किया गया पाठ, मीडिया या बाहरी URL प्रदर्शित नहीं किया गया है। कारण: ${verReason}`
+                  : `Blocked record: no scraped body, media, or clickable unsafe URL is shown. Reason: ${verReason}`
+                : summary ||
+                  (isHi
+                    ? 'कोई अनुमत सारांश उपलब्ध नहीं है। पूर्ण सामग्री के लिए नीचे दिए गए आधिकारिक स्रोत लिंक पर जाएं।'
+                    : 'No permitted summary extract. Visit the canonical source link below.')
             }
           </p>
           <p style="margin:10px 0 0; font-size:0.82rem; color:var(--text-muted);">
@@ -942,18 +1097,28 @@ function renderArticleDetailPage(articleId: string, allItems: ArticleRecord[]): 
             }
           </p>
           <div class="article-actions" style="margin-top:14px;">
-            <a
-              href="${item.sourceUrl}"
-              target="_blank"
-              rel="noopener noreferrer"
-              class="ext-link-btn"
-            >
-              ${
-                isHi
-                  ? `मूल प्रकाशक (${publisher}) पर पूर्ण सामग्री पढ़ें ↗`
-                  : `Open Original Source at ${publisher} (Safe HTTPS Link) ↗`
-              }
-            </a>
+            ${
+              isBlocked || !item.sourceUrl
+                ? `<span class="withheld-link-notice" data-testid="detail-withheld-link-notice">
+                    ⛔ ${
+                      isHi
+                        ? 'असुरक्षित / अनुमत-रहित बाहरी लिंक रोका गया (Unsafe URL Withheld)'
+                        : 'Unsafe / Unpermitted External URL Withheld (Non-Clickable)'
+                    }
+                  </span>`
+                : `<a
+                    href="${item.sourceUrl}"
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    class="ext-link-btn"
+                  >
+                    ${
+                      isHi
+                        ? `मूल प्रकाशक (${publisher}) पर पूर्ण सामग्री पढ़ें ↗`
+                        : `Open Original Source at ${publisher} (Safe HTTPS Link) ↗`
+                    }
+                  </a>`
+            }
           </div>
         </div>
 
@@ -1081,7 +1246,7 @@ function renderArticleDetailPage(articleId: string, allItems: ArticleRecord[]): 
                         <div>
                           <strong>Article ID:</strong> <code>${r.articleId}</code> ·
                           <strong>Timestamp:</strong> <code>${r.timestamp}</code> ·
-                          <span style="color:var(--amber-400);">Reviewed by Editorial Team Queue</span>
+                          <span style="color:var(--amber-400);">Reviewed by Editorial Team Queue (${r.storageMode ?? 'local_draft_only'})</span>
                         </div>
                         <div style="margin-top:4px; color:var(--text-primary);">
                           <strong>Reason:</strong> ${r.reason}
@@ -1094,40 +1259,67 @@ function renderArticleDetailPage(articleId: string, allItems: ArticleRecord[]): 
           </div>
         </div>
 
-        <!-- 2. STRUCTURED ARTICLE ISSUE FEEDBACK SYSTEM (Inaccuracies, Broken Links, Outdated Info) -->
-        <div class="state-banner" style="margin-top:14px;" data-testid="article-feedback-section">
-          <h2 style="margin:0 0 6px; font-size:1.08rem; font-family:var(--font-serif);">
-            ${
-              isHi
-                ? 'लेख प्रतिक्रिया एवं त्रुटि रिपोर्ट प्रणाली (Article Issue Feedback System)'
-                : 'Article Issue Feedback System (Report Inaccuracies, Broken Links or Outdated Info)'
-            }
-          </h2>
+        <!-- 2. STRUCTURED ARTICLE ISSUE FEEDBACK SYSTEM (Spec v3 Page 8 Items 1-9) -->
+        <div class="state-banner" style="margin-top:14px;" id="article-feedback-section" data-testid="article-feedback-section">
+          <div style="display:flex; flex-wrap:wrap; align-items:center; justify-content:space-between; gap:8px;">
+            <h2 style="margin:0 0 6px; font-size:1.08rem; font-family:var(--font-serif);">
+              ${
+                isHi
+                  ? 'लेख प्रतिक्रिया एवं त्रुटि रिपोर्ट प्रणाली (Article Issue Feedback System — Spec v3 §8)'
+                  : 'Article Issue Feedback System (Report Inaccuracies, Broken Links or Outdated Info)'
+              }
+            </h2>
+            <span class="verification-badge" data-verification="pending">
+              ${isHi ? 'चरण 1: स्थानीय ड्राफ्ट (Remote Submit Disabled)' : 'Stage 1: Local Draft Only (Remote Submit Disabled)'}
+            </span>
+          </div>
           <p style="margin:0 0 12px; font-size:0.85rem; color:var(--text-secondary);">
             ${
               isHi
-                ? 'तथ्यगत त्रुटि, टूटे हुए लिंक या पुरानी जानकारी की रिपोर्ट करें। यह प्रणाली लेख आईडी, समस्या का प्रकार और आपकी टिप्पणी को समीक्षा के लिए दर्ज करती है।'
-                : 'Report inaccuracies, broken links, or outdated information directly. Captures Article ID, Issue Type, and your comments for editorial review.'
+                ? 'तथ्यगत त्रुटि (inaccuracy), टूटे हुए लिंक (brokenLink), पुरानी जानकारी (outdated) या अन्य समस्या की रिपोर्ट करें। बिना खाते या संपर्क के सबमिट किया जा सकता है। विवरण 20–2000 अक्षरों का होना चाहिए।'
+                : 'Report inaccuracies, broken links, or outdated information without an account or contact. Description requires 20–2000 plain-text characters.'
             }
           </p>
 
           <form id="article-feedback-form" data-article-id="${item.id}" data-article-title="${title}">
+            <div style="display:none;" aria-hidden="true">
+              <label for="article-fb-honeypot">Leave empty</label>
+              <input type="text" id="article-fb-honeypot" name="honeypot" tabindex="-1" autocomplete="off" />
+            </div>
+
+            <div class="form-field-group">
+              <label for="feedback-article-id-input">
+                ${isHi ? 'लेख आईडी (Prefilled Article ID):' : 'Prefilled Article ID:'}
+              </label>
+              <input
+                type="text"
+                id="feedback-article-id-input"
+                name="articleId"
+                value="${item.id}"
+                readonly
+                style="opacity:0.85; font-family:var(--font-mono);"
+              />
+            </div>
+
             <div class="form-field-group">
               <label for="feedback-issue-type-select">
                 ${isHi ? 'समस्या का प्रकार चुनें (Select Issue Type):' : 'Issue Type:'}
               </label>
               <select id="feedback-issue-type-select" name="issueType">
                 <option value="inaccuracy" ${state.feedbackSelectedType === 'inaccuracy' ? 'selected' : ''}>
-                  ${isHi ? '1. तथ्यगत त्रुटि (Factual Inaccuracy)' : '1. Factual Inaccuracy'}
+                  ${isHi ? '1. तथ्यगत त्रुटि (inaccuracy — Factual Inaccuracy)' : '1. Factual Inaccuracy (inaccuracy)'}
                 </option>
-                <option value="broken_link" ${state.feedbackSelectedType === 'broken_link' ? 'selected' : ''}>
-                  ${isHi ? '2. टूटा हुआ स्रोत लिंक (Broken Source Link)' : '2. Broken Source Link'}
+                <option value="brokenLink" ${state.feedbackSelectedType === 'brokenLink' ? 'selected' : ''}>
+                  ${isHi ? '2. टूटा हुआ स्रोत लिंक (brokenLink — Broken Source Link)' : '2. Broken Source Link (brokenLink)'}
                 </option>
-                <option value="outdated_info" ${state.feedbackSelectedType === 'outdated_info' ? 'selected' : ''}>
-                  ${isHi ? '3. पुरानी जानकारी (Outdated Information)' : '3. Outdated Information'}
+                <option value="outdated" ${state.feedbackSelectedType === 'outdated' ? 'selected' : ''}>
+                  ${isHi ? '3. पुरानी जानकारी (outdated — Outdated Information)' : '3. Outdated Information (outdated)'}
                 </option>
-                <option value="attribution_issue" ${state.feedbackSelectedType === 'attribution_issue' ? 'selected' : ''}>
-                  ${isHi ? '4. स्रोत श्रेय समस्या (Source Attribution Issue)' : '4. Source Attribution Issue'}
+                <option value="other" ${state.feedbackSelectedType === 'other' ? 'selected' : ''}>
+                  ${isHi ? '4. अन्य / श्रेय समस्या (other — Other / Attribution Issue)' : '4. Other / Attribution Issue (other)'}
+                </option>
+                <option value="general" ${state.feedbackSelectedType === 'general' ? 'selected' : ''}>
+                  ${isHi ? '5. सामान्य प्रतिक्रिया (general — General Feedback)' : '5. General Feedback (general)'}
                 </option>
               </select>
             </div>
@@ -1136,20 +1328,61 @@ function renderArticleDetailPage(articleId: string, allItems: ArticleRecord[]): 
               <label for="feedback-comments-input">
                 ${
                   isHi
-                    ? 'आपकी टिप्पणी / विवरण (User Comments):'
-                    : 'Your Comments / Details:'
+                    ? 'समस्या का विवरण / टिप्पणी (Description — अनिवार्य, 20 से 2000 सादे अक्षर):'
+                    : 'Issue Description / Comments (Required, 20–2000 plain-text characters):'
                 }
               </label>
               <textarea
                 id="feedback-comments-input"
                 name="comments"
                 rows="3"
+                minlength="20"
+                maxlength="2000"
                 placeholder="${
                   isHi
-                    ? 'उदाहरण: कैननिकल लिंक 404 दे रहा है या प्रकाशन समय अपडेट करने की आवश्यकता है...'
-                    : 'e.g., The canonical link redirects to an archive page or timestamp is outdated...'
+                    ? 'कम से कम 20 अक्षरों में समस्या का विवरण लिखें (उदाहरण: कैननिकल लिंक 404 दे रहा है या प्रकाशन समय अपडेट करने की आवश्यकता है)...'
+                    : 'Describe the inaccuracy, broken link, or outdated info in 20–2000 characters (do not include personal or child data)...'
                 }"
               ></textarea>
+            </div>
+
+            <div class="form-field-group">
+              <label for="feedback-contact-input">
+                ${
+                  isHi
+                    ? 'वैकल्पिक संपर्क (Optional Contact — अधिकतम 160 अक्षर, अनाम रिपोर्ट के लिए खाली छोड़ें):'
+                    : 'Optional Contact (Max 160 chars — leave blank for anonymous submission):'
+                }
+              </label>
+              <input
+                type="text"
+                id="feedback-contact-input"
+                name="contact"
+                maxlength="160"
+                placeholder="${
+                  isHi
+                    ? 'वैकल्पिक: केवल समस्या पर फॉलो-अप के लिए (1-क्लिक में हटाने योग्य)'
+                    : 'Optional: used only to follow up on this issue (deletable anytime)'
+                }"
+              />
+            </div>
+
+            <div
+              style="margin-bottom:12px; padding:10px 12px; border-radius:6px; background:var(--navy-950); border:1px solid var(--border-subtle); font-size:0.78rem; color:var(--text-secondary);"
+              data-testid="feedback-privacy-retention-notice"
+            >
+              <strong>${
+                isHi
+                  ? 'गोपनीयता, बाल-सुरक्षा एवं प्रतिधारण नीति (Privacy & Retention Notice — Spec v3 §8.6–8.9):'
+                  : 'Privacy, Child-Safety & Retention Notice (Spec v3 §8.6–8.9):'
+              }</strong>
+              <div style="margin-top:4px;">
+                ${
+                  isHi
+                    ? '• वैकल्पिक संपर्क का उपयोग केवल फॉलो-अप के लिए किया जाता है, यह केवल प्रमाणित समीक्षकों के लिए सुलभ है (सार्वजनिक रूप से कभी नहीं), और आप इसे नीचे 1-क्लिक में हटा सकते हैं। विवरण में व्यक्तिगत डेटा या बच्चों का संपर्क न लिखें। प्रस्तावित प्रतिधारण डिफ़ॉल्ट (लॉन्च से पहले अनुमोदन हेतु): समाधान के 30 दिनों के भीतर संपर्क हटाना; अनसुलझी प्रतिक्रिया 90 दिनों तक। चरण 1 में निजी स्टोरेज न जुड़ा होने के कारण रिमोट सर्वर सबमिट अक्षम है।'
+                    : '• Optional contact is used only for follow-up, accessible only to authenticated editorial reviewers (never public), and can be deleted anytime below. Do not include personal data or child contact in descriptions. Proposed retention defaults (to approve before launch): delete optional contact within 30 days after resolution; unresolved feedback within 90 days. Because private reviewer storage is not connected in Stage 1, remote submit is disabled and only a local draft is preserved on your device.'
+                }
+              </div>
             </div>
 
             ${
@@ -1168,11 +1401,27 @@ function renderArticleDetailPage(articleId: string, allItems: ArticleRecord[]): 
             }
 
             <div style="display:flex; flex-wrap:wrap; align-items:center; gap:10px;">
+              <button
+                type="button"
+                disabled
+                aria-disabled="true"
+                class="btn-quiet"
+                style="opacity:0.65; cursor:not-allowed;"
+                data-testid="remote-article-submit-disabled-btn"
+                title="Private editorial storage is not connected in Stage 1"
+              >
+                ${
+                  isHi
+                    ? '🔒 रिमोट सर्वर सबमिट अनुपलब्ध (Stage 1 Private Storage Unavailable)'
+                    : '🔒 Remote Server Submit Unavailable (Stage 1 Private Storage Not Connected)'
+                }
+              </button>
+
               <button type="submit" class="btn-amber" id="submit-article-feedback-btn">
                 ${
                   isHi
-                    ? 'प्रतिक्रिया दर्ज करें (Submit Issue Feedback)'
-                    : 'Submit Issue Feedback for Review'
+                    ? 'डिवाइस पर स्थानीय प्रतिक्रिया ड्राफ्ट दर्ज करें (Save Local Feedback Draft)'
+                    : 'Save Local Feedback Draft for Review'
                 }
               </button>
               <a href="/corrections" data-nav="/corrections" class="nav-link-btn" style="border:1px solid var(--border-subtle);">
@@ -1189,8 +1438,8 @@ function renderArticleDetailPage(articleId: string, allItems: ArticleRecord[]): 
             <strong style="font-size:0.84rem; color:var(--text-secondary);">
               ${
                 isHi
-                  ? `इस लेख के लिए दर्ज प्रतिक्रियाएं (${articleFeedbackList.length}):`
-                  : `Logged Issue Feedback for Review (${articleFeedbackList.length}):`
+                  ? `इस लेख के लिए स्थानीय प्रतिक्रिया ड्राफ्ट (${articleFeedbackList.length}):`
+                  : `Local Issue Feedback Drafts for This Article (${articleFeedbackList.length}):`
               }
             </strong>
             ${
@@ -1198,8 +1447,8 @@ function renderArticleDetailPage(articleId: string, allItems: ArticleRecord[]): 
                 ? `<div style="font-size:0.8rem; color:var(--text-muted); margin-top:4px;">
                     ${
                       isHi
-                        ? 'इस लेख के लिए अभी तक कोई प्रतिक्रिया दर्ज नहीं की गई है।'
-                        : 'No issue feedback logged for this article yet.'
+                        ? 'इस लेख के लिए अभी तक कोई प्रतिक्रिया ड्राफ्ट दर्ज नहीं किया गया है।'
+                        : 'No issue feedback drafts logged for this article yet.'
                     }
                   </div>`
                 : articleFeedbackList
@@ -1209,10 +1458,32 @@ function renderArticleDetailPage(articleId: string, allItems: ArticleRecord[]): 
                         <div>
                           <strong>Article ID:</strong> <code>${fb.articleId}</code> ·
                           <strong>Issue Type:</strong> <code>${fb.issueType}</code> ·
-                          <strong>Timestamp:</strong> <code>${fb.timestamp}</code>
+                          <strong>Status:</strong> <code>${fb.reviewStatus ?? 'new'} (${fb.storageMode ?? 'local_draft_only'})</code> ·
+                          <strong>Created:</strong> <code>${fb.createdAt || fb.timestamp}</code>
                         </div>
                         <div style="margin-top:4px; color:var(--text-primary);">
-                          <strong>Comments:</strong> ${fb.comments}
+                          <strong>Description:</strong> ${fb.description || fb.comments}
+                        </div>
+                        <div style="margin-top:4px; display:flex; flex-wrap:wrap; align-items:center; justify-content:space-between; gap:8px;">
+                          <span style="font-family:var(--font-mono); font-size:0.75rem; color:var(--text-muted);">
+                            Contact: ${fb.contact ? `[Saved: ${fb.contact}]` : 'None (Anonymous)'}
+                          </span>
+                          <div style="display:flex; gap:8px;">
+                            ${
+                              fb.contact
+                                ? `<button type="button" class="btn-quiet delete-feedback-contact-btn" data-feedback-id="${
+                                    fb.feedbackId || fb.id
+                                  }" style="min-height:32px; padding:3px 8px; font-size:0.74rem;">
+                                    🗑️ ${isHi ? 'संपर्क हटाएं (Delete Contact)' : 'Delete Optional Contact'}
+                                  </button>`
+                                : ''
+                            }
+                            <button type="button" class="btn-quiet delete-feedback-draft-btn" data-feedback-id="${
+                              fb.feedbackId || fb.id
+                            }" style="min-height:32px; padding:3px 8px; font-size:0.74rem;">
+                              ✕ ${isHi ? 'ड्राफ्ट हटाएं' : 'Delete Draft'}
+                            </button>
+                          </div>
                         </div>
                       </div>
                     `
@@ -1294,7 +1565,11 @@ function renderApp(): void {
       items,
       loadCorrectionDrafts(),
       loadArticleReports(),
-      loadArticleFeedback()
+      loadArticleFeedback(),
+      {
+        error: state.generalFeedbackError,
+        notice: state.generalFeedbackNotice,
+      }
     );
   } else if (state.route === '/privacy') {
     mainContentHtml = renderPrivacyAndPowerPage(
@@ -1442,7 +1717,7 @@ function renderApp(): void {
                 3. Stale / Offline Cache Simulation
               </option>
               <option value="test_fixtures" ${state.feedMode === 'test_fixtures' ? 'selected' : ''}>
-                4. [TEST] Specification Fixture Inspection (id=test-001)
+                4. [TEST] Specification Fixture Inspection (id=test-001..004)
               </option>
             </select>
           </div>
@@ -1475,7 +1750,7 @@ function renderApp(): void {
             <ul class="footer-nav-list">
               <li><a href="/about" data-nav="/about">${isHi ? 'हमारे बारे में एवं फ़ीचर मैट्रिक्स (About & Matrix)' : 'About, Feature Matrix & Open Decisions'}</a></li>
               <li><a href="/sources" data-nav="/sources">${isHi ? 'संपादकीय एवं स्रोत नीति (Editorial & Source Policy)' : 'Editorial & Source Allowlist Policy'}</a></li>
-              <li><a href="/corrections" data-nav="/corrections">${isHi ? 'संशोधन एवं शिकायत निवारण (Corrections)' : 'Corrections & Updates Log'}</a></li>
+              <li><a href="/corrections" data-nav="/corrections">${isHi ? 'संशोधन, समस्या रिपोर्ट एवं सामान्य प्रतिक्रिया (Corrections & Feedback)' : 'Corrections, Issue Reports & General Feedback'}</a></li>
               <li><a href="/privacy" data-nav="/privacy">${isHi ? 'गोपनीयता, शर्तें एवं पावर बजट (Privacy, Terms & Power)' : 'Privacy, Terms, Accessibility & Power Budget'}</a></li>
             </ul>
           </div>
@@ -1511,6 +1786,8 @@ function navigateTo(path: string): void {
   state.reportArticleNotice = null;
   state.feedbackError = null;
   state.feedbackNotice = null;
+  state.generalFeedbackError = null;
+  state.generalFeedbackNotice = null;
   window.history.pushState({}, '', normalized);
   renderApp();
   window.scrollTo({ top: 0, behavior: 'auto' });
@@ -1779,6 +2056,19 @@ function bindEventsAndLifecycle(activeArticles: ArticleRecord[]): void {
     });
   });
 
+  // Card "Report article issue" shortcut button on Home / section cards (Spec v3 Page 8 Item 1)
+  document.querySelectorAll<HTMLButtonElement>('.card-report-issue-btn').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      const aid = btn.getAttribute('data-report-article-id');
+      if (!aid) return;
+      navigateTo(`/article/${aid}`);
+      const sectionEl = document.getElementById('article-feedback-section');
+      const inputEl = document.getElementById('feedback-comments-input') as HTMLTextAreaElement | null;
+      sectionEl?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      inputEl?.focus();
+    });
+  });
+
   // Top "Report Article" button on Article Detail page scrolls to and focuses the Report Article form
   document.getElementById('open-report-article-btn')?.addEventListener('click', () => {
     state.reportPromptOpen = true;
@@ -1830,23 +2120,30 @@ function bindEventsAndLifecycle(activeArticles: ArticleRecord[]): void {
     state.feedbackSelectedType = issueTypeSelect.value as ArticleIssueType;
   });
 
-  // Submit Structured Article Issue Feedback Form (Inaccuracy, Broken Link, Outdated Info, Attribution)
+  // Submit Structured Article Issue Feedback Form (Spec v3 Page 8 Items 1-9)
   const feedbackForm = document.getElementById('article-feedback-form') as HTMLFormElement | null;
   feedbackForm?.addEventListener('submit', (e) => {
     e.preventDefault();
     const selectEl = document.getElementById('feedback-issue-type-select') as HTMLSelectElement | null;
     const commentsEl = document.getElementById('feedback-comments-input') as HTMLTextAreaElement | null;
+    const contactEl = document.getElementById('feedback-contact-input') as HTMLInputElement | null;
+    const honeypotEl = document.getElementById('feedback-honeypot-input') as HTMLInputElement | null;
     const articleId = feedbackForm.getAttribute('data-article-id') || '';
     const articleTitle = feedbackForm.getAttribute('data-article-title') || 'Article';
 
     const issueTypeVal = selectEl?.value ?? state.feedbackSelectedType;
-    const result = validateAndCreateArticleFeedback(
+    const result = validateAndCreateArticleFeedback({
       articleId,
       articleTitle,
-      issueTypeVal,
-      commentsEl?.value ?? '',
-      new Date().toISOString()
-    );
+      issueType: issueTypeVal,
+      description: commentsEl?.value ?? '',
+      contact: contactEl?.value ?? '',
+      honeypot: honeypotEl?.value ?? '',
+      nowIso: new Date().toISOString(),
+      lastSubmittedAtMs: state.lastFeedbackSubmittedAtMs,
+      seenIdempotencyTokens: state.seenIdempotencyTokens,
+      cooldownMs: 3000,
+    });
 
     if (!result.valid || !result.entry) {
       state.feedbackError = state.lang === 'hi' ? result.errorHi ?? null : result.errorEn ?? null;
@@ -1855,18 +2152,89 @@ function bindEventsAndLifecycle(activeArticles: ArticleRecord[]): void {
       return;
     }
 
+    state.lastFeedbackSubmittedAtMs = Date.now();
+    state.seenIdempotencyTokens.add(result.entry.idempotencyToken);
+
     saveArticleFeedback(result.entry);
     appendBoundedLog(
       'ARTICLE_FEEDBACK_LOGGED',
       state.powerTier,
-      `Article=${result.entry.articleId}, Type=${result.entry.issueType}`
+      `Article=${result.entry.articleId}, Type=${result.entry.issueType}, Mode=${result.entry.storageMode}`
     );
     state.feedbackError = null;
     state.feedbackNotice =
       state.lang === 'hi'
-        ? `प्रतिक्रिया दर्ज की गई (लेख ID: ${result.entry.articleId}, प्रकार: ${result.entry.issueType})। समीक्षा के लिए उपलब्ध।`
-        : `Issue feedback logged (Article ID: ${result.entry.articleId}, Issue Type: ${result.entry.issueType}) and made available for review.`;
+        ? `स्थानीय ड्राफ्ट दर्ज किया गया (ID: ${result.entry.feedbackId}, लेख: ${result.entry.articleId}, प्रकार: ${result.entry.issueType})। रिमोट सर्वर सबमिशन चरण 1 में असंबद्ध/अक्षम है।`
+        : `Local feedback draft saved on this device (Feedback ID: ${result.entry.feedbackId}, Article ID: ${result.entry.articleId}, Issue Type: ${result.entry.issueType}). Remote server submit remains disabled in Stage 1 until durable storage is connected.`;
     renderApp();
+  });
+
+  // Submit General Feedback Form on /corrections (`articleId = null`, Spec v3 Page 8 Item 1)
+  const generalFeedbackForm = document.getElementById('general-feedback-form') as HTMLFormElement | null;
+  generalFeedbackForm?.addEventListener('submit', (e) => {
+    e.preventDefault();
+    const selectEl = document.getElementById('general-feedback-type-select') as HTMLSelectElement | null;
+    const descEl = document.getElementById('general-feedback-desc-input') as HTMLTextAreaElement | null;
+    const contactEl = document.getElementById('general-feedback-contact-input') as HTMLInputElement | null;
+    const honeypotEl = document.getElementById('general-feedback-honeypot') as HTMLInputElement | null;
+
+    const result = validateAndCreateArticleFeedback({
+      articleId: null,
+      articleTitle: 'General Feedback (No Article ID)',
+      issueType: selectEl?.value ?? 'general',
+      description: descEl?.value ?? '',
+      contact: contactEl?.value ?? '',
+      honeypot: honeypotEl?.value ?? '',
+      nowIso: new Date().toISOString(),
+      lastSubmittedAtMs: state.lastFeedbackSubmittedAtMs,
+      seenIdempotencyTokens: state.seenIdempotencyTokens,
+      cooldownMs: 3000,
+    });
+
+    if (!result.valid || !result.entry) {
+      state.generalFeedbackError = state.lang === 'hi' ? result.errorHi ?? null : result.errorEn ?? null;
+      state.generalFeedbackNotice = null;
+      renderApp();
+      return;
+    }
+
+    state.lastFeedbackSubmittedAtMs = Date.now();
+    state.seenIdempotencyTokens.add(result.entry.idempotencyToken);
+
+    saveArticleFeedback(result.entry);
+    appendBoundedLog(
+      'GENERAL_FEEDBACK_LOGGED',
+      state.powerTier,
+      `Article=null, Type=${result.entry.issueType}, Mode=${result.entry.storageMode}`
+    );
+    state.generalFeedbackError = null;
+    state.generalFeedbackNotice =
+      state.lang === 'hi'
+        ? `सामान्य प्रतिक्रिया स्थानीय ड्राफ्ट के रूप में सहेजी गई (ID: ${result.entry.feedbackId}, articleId: null)। रिमोट सर्वर सबमिशन चरण 1 में असंबद्ध है।`
+        : `General feedback saved as a local draft on this device (ID: ${result.entry.feedbackId}, articleId: null). Remote server submit remains disabled in Stage 1.`;
+    renderApp();
+  });
+
+  // 1-Click Delete Optional Contact from a saved feedback draft (Spec v3 Page 8 Item 6)
+  document.querySelectorAll<HTMLButtonElement>('.delete-feedback-contact-btn').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      const fid = btn.getAttribute('data-feedback-id');
+      if (!fid) return;
+      deleteContactFromLocalFeedback(fid);
+      appendBoundedLog('FEEDBACK_CONTACT_DELETED', state.powerTier, `Removed optional contact from ${fid}`);
+      renderApp();
+    });
+  });
+
+  // 1-Click Delete Feedback Draft (Spec v3 Page 8 Item 9)
+  document.querySelectorAll<HTMLButtonElement>('.delete-feedback-draft-btn').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      const fid = btn.getAttribute('data-feedback-id');
+      if (!fid) return;
+      deleteLocalFeedbackEntry(fid);
+      appendBoundedLog('FEEDBACK_DRAFT_DELETED', state.powerTier, `Deleted local feedback draft ${fid}`);
+      renderApp();
+    });
   });
 
   // Power Tier Simulator Presets on /privacy

@@ -340,3 +340,24 @@ export function saveArticleFeedback(feedback: ArticleFeedbackEntry): ArticleFeed
   return updated;
 }
 
+export function deleteContactFromLocalFeedback(feedbackId: string): ArticleFeedbackEntry[] {
+  const existing = loadArticleFeedback();
+  const updated = existing.map((item) =>
+    item.feedbackId === feedbackId || item.id === feedbackId
+      ? { ...item, contact: null }
+      : item
+  );
+  safeSetItem(STORAGE_KEYS.ARTICLE_FEEDBACK, JSON.stringify(updated));
+  return updated;
+}
+
+export function deleteLocalFeedbackEntry(feedbackId: string): ArticleFeedbackEntry[] {
+  const existing = loadArticleFeedback();
+  const updated = existing.filter(
+    (item) => item.feedbackId !== feedbackId && item.id !== feedbackId
+  );
+  safeSetItem(STORAGE_KEYS.ARTICLE_FEEDBACK, JSON.stringify(updated));
+  return updated;
+}
+
+

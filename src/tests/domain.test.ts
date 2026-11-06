@@ -1,20 +1,25 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
+  deleteContactFromFeedbackRecord,
   evaluatePowerTier,
   formatSourceTimestamp,
+  getEditorialStateBadgeMeta,
   getVerificationBadgeMeta,
   isRecordExpired,
   MAX_SELF_HEAL_RETRIES,
+  normalizeVerificationStatus,
   prioritizeArticlesByPreferences,
   recordFailureAndAdvanceCircuit,
   resolveCityFromTransientCoords,
   sanitizeString,
+  submitFeedbackWithHonestStorage,
   validateAndCreateArticleFeedback,
   validateAndCreateArticleReport,
   validateEventTimestamp,
   validateFeedEnvelope,
   validateHttpsCanonicalUrl,
+  verifyReviewerQueueAccess,
 } from '../domain/validation';
 import { SOURCE_ALLOWLIST_LEDGER } from '../data/sourcesLedger';
 import { PACKAGED_CITIES } from '../data/citiesDataset';
@@ -102,7 +107,7 @@ test('4. Future and missing timestamps: rejected in production without substitut
   assert.match(labelForMissing, /Source time unavailable/);
 });
 
-test('5. TEST fixture contract (test-001): strictly rejected in production, inspectable in test mode', () => {
+test('5. TEST fixture contract (test-001..004): strictly rejected in production, inspectable in test mode with Pending, Blocked, and Retracted rules', () => {
   const prodResult = validateFeedEnvelope(TEST_FIXTURE_ENVELOPE, SOURCE_ALLOWLIST_LEDGER, {
     isProduction: true,
     referenceNowIso: REF_NOW,
@@ -117,7 +122,8 @@ test('5. TEST fixture contract (test-001): strictly rejected in production, insp
     isProduction: false,
     referenceNowIso: REF_NOW,
   });
-  assert.equal(devTestResult.acceptedItems.length, 3);
+  assert.equal(devTestResult.acceptedItems.length, 4);
+
   // Future timestamp item must have its verificationStatus demoted to 'pending' and script stripped
   const secondItem = devTestResult.acceptedItems.find((i) => i.id === 'test-002-future-time');
   assert.ok(secondItem);
@@ -125,9 +131,23 @@ test('5. TEST fixture contract (test-001): strictly rejected in production, insp
   assert.equal(secondItem.isBreaking, false);
   assert.equal(secondItem.title.includes('<script>'), false);
 
-  const retractedItem = devTestResult.acceptedItems.find((i) => i.id === 'test-003-retracted');
+  // Blocked source item must strip body, media, and unsafe URL
+  const blockedItem = devTestResult.acceptedItems.find((i) => i.id === 'test-003-blocked-source');
+  assert.ok(blockedItem);
+  assert.equal(blockedItem.verificationStatus, 'blocked');
+  assert.equal(blockedItem.editorialState, 'withheld');
+  assert.equal(blockedItem.permittedSummary, null);
+  assert.equal(blockedItem.licensedImage, null);
+  assert.equal(blockedItem.sourceUrl, '');
+  assert.equal(blockedItem.sourceUrlWithheld, true);
+  assert.equal(blockedItem.isBreaking, false);
+
+  // Retracted item uses separate editorialState ('retracted') while verificationStatus remains 'verified'
+  const retractedItem = devTestResult.acceptedItems.find((i) => i.id === 'test-004-retracted');
   assert.ok(retractedItem);
-  assert.equal(retractedItem.verificationStatus, 'retracted');
+  assert.equal(retractedItem.verificationStatus, 'verified');
+  assert.equal(retractedItem.editorialState, 'retracted');
+  assert.equal(retractedItem.isBreaking, false);
 });
 
 test('6. Duplicate IDs and duplicate canonical URLs: rejects duplicate IDs and consolidates duplicate URLs', () => {
@@ -165,7 +185,6 @@ test('7. Expired records: filtered out in production mode', () => {
 });
 
 test('8. Approximate location city resolution: resolves city, detects ambiguity, and discards raw coords', () => {
-  // Coordinates right between New Delhi (28.6139, 77.2090) and Noida (28.5355, 77.3910) -> ~20km apart
   const resolution = resolveCityFromTransientCoords(28.58, 77.3, PACKAGED_CITIES, REF_NOW);
   assert.ok(resolution.resolved);
   assert.equal(resolution.isAmbiguous, true);
@@ -180,7 +199,6 @@ test('8. Approximate location city resolution: resolves city, detects ambiguity,
 });
 
 test('9. Adaptive Power Tiers: enforces Normal/Saver/Critical/Survival thresholds, hysteresis, and thermal drop', () => {
-  // Normal at 80%
   const t1 = evaluatePowerTier('Normal', {
     batteryPct: 80,
     isCharging: false,
@@ -193,7 +211,6 @@ test('9. Adaptive Power Tiers: enforces Normal/Saver/Critical/Survival threshold
   });
   assert.equal(t1, 'Normal');
 
-  // Thermal moderate drops Normal -> Saver immediately
   const tThermal = evaluatePowerTier('Normal', {
     batteryPct: 80,
     isCharging: false,
@@ -206,7 +223,6 @@ test('9. Adaptive Power Tiers: enforces Normal/Saver/Critical/Survival threshold
   });
   assert.equal(tThermal, 'Saver');
 
-  // Drop to Critical at 12%
   const tCrit = evaluatePowerTier('Saver', {
     batteryPct: 12,
     isCharging: false,
@@ -219,7 +235,6 @@ test('9. Adaptive Power Tiers: enforces Normal/Saver/Critical/Survival threshold
   });
   assert.equal(tCrit, 'Critical');
 
-  // Hysteresis: rising to 16% (within 15% + 3% buffer) stays Critical if not charging
   const tHyst = evaluatePowerTier('Critical', {
     batteryPct: 16,
     isCharging: false,
@@ -232,7 +247,6 @@ test('9. Adaptive Power Tiers: enforces Normal/Saver/Critical/Survival threshold
   });
   assert.equal(tHyst, 'Critical');
 
-  // Survival below 5%
   const tSurv = evaluatePowerTier('Critical', {
     batteryPct: 4,
     isCharging: false,
@@ -261,25 +275,62 @@ test('10. Self-healing exponential backoff and circuit breaker cap', () => {
     assert.ok(step.backoffMs && step.backoffMs >= 10000 * Math.pow(2, i - 1));
   }
 
-  // Exceeding MAX_SELF_HEAL_RETRIES trips circuit breaker to OPEN and defers recovery
   const tripped = recordFailureAndAdvanceCircuit(state, REF_NOW, 10000, 0);
   assert.equal(tripped.nextState.status, 'OPEN');
   assert.equal(tripped.deferredToNextWindow, true);
   assert.equal(tripped.backoffMs, null);
 });
 
-test('11. Verification status visual indicator metadata: maps verified, pending, and retracted accurately', () => {
+test('11. Verification status & editorialState indicators (Spec v3 Page 7): maps verified/pending/blocked, falls back unknown to Pending, and separates Retracted', () => {
+  assert.deepEqual(normalizeVerificationStatus('verified', true), {
+    status: 'verified',
+    fallbackUsed: false,
+  });
+  assert.deepEqual(normalizeVerificationStatus('pending', true), {
+    status: 'pending',
+    fallbackUsed: false,
+  });
+  assert.deepEqual(normalizeVerificationStatus('blocked', true), {
+    status: 'blocked',
+    fallbackUsed: false,
+  });
+  // Missing, unknown, or malformed status falls back to 'pending', never 'verified'
+  assert.deepEqual(normalizeVerificationStatus(undefined, true), {
+    status: 'pending',
+    fallbackUsed: true,
+  });
+  assert.deepEqual(normalizeVerificationStatus(null, true), {
+    status: 'pending',
+    fallbackUsed: true,
+  });
+  assert.deepEqual(normalizeVerificationStatus('malformed_status', true), {
+    status: 'pending',
+    fallbackUsed: true,
+  });
+  assert.deepEqual(normalizeVerificationStatus('verified', false), {
+    status: 'pending',
+    fallbackUsed: true,
+  });
+
   const vBadge = getVerificationBadgeMeta('verified', 'en');
+  assert.equal(vBadge.status, 'verified');
   assert.equal(vBadge.labelEn, 'Verified');
-  assert.match(vBadge.displayLabel, /Verified/);
+  assert.match(vBadge.displayLabel, /✓ Verified/);
 
-  const pBadge = getVerificationBadgeMeta('pending', 'en');
-  assert.equal(pBadge.labelEn, 'Pending Verification');
-  assert.match(pBadge.displayLabel, /Pending Verification/);
+  const pBadge = getVerificationBadgeMeta('unknown_value', 'en');
+  assert.equal(pBadge.status, 'pending');
+  assert.equal(pBadge.labelEn, 'Pending');
+  assert.match(pBadge.displayLabel, /⏳ Pending/);
 
-  const rBadge = getVerificationBadgeMeta('retracted', 'en');
-  assert.equal(rBadge.labelEn, 'Retracted');
-  assert.match(rBadge.displayLabel, /Retracted/);
+  const bBadge = getVerificationBadgeMeta('blocked', 'en');
+  assert.equal(bBadge.status, 'blocked');
+  assert.equal(bBadge.labelEn, 'Blocked');
+  assert.match(bBadge.displayLabel, /⛔ Blocked/);
+
+  const rEditorial = getEditorialStateBadgeMeta('retracted', 'en');
+  assert.ok(rEditorial);
+  assert.equal(rEditorial.labelEn, 'Retracted');
+  assert.match(rEditorial.displayLabel, /⚠ Retracted/);
 });
 
 test('12. User category preferences: prioritizes and orders articles matching selected categories', () => {
@@ -288,7 +339,6 @@ test('12. User category preferences: prioritizes and orders articles matching se
     referenceNowIso: REF_NOW,
   }).acceptedItems;
 
-  // Prioritize 'earthquakes' and 'weather' only
   const prioritized = prioritizeArticlesByPreferences(
     validItems,
     ['earthquakes', 'weather'],
@@ -296,13 +346,12 @@ test('12. User category preferences: prioritizes and orders articles matching se
   );
 
   assert.equal(prioritized.prioritizedItems.length, 2);
-  // Earthquakes was listed first in selectedCategories, so NCS earthquake item comes first
   assert.equal(prioritized.prioritizedItems[0].id, 'link-national-ncs-01');
   assert.equal(prioritized.prioritizedItems[1].id, 'link-state-imd-01');
   assert.ok(prioritized.secondaryItems.length >= 2);
 });
 
-test('13. Report Article & Article Issue Feedback validators: sanitize strings, capture IDs/timestamps, and reject invalid input', () => {
+test('13. Report Article & Spec v3 Feedback validators: 20-2000 char limits, script stripping, anonymous contact, contact deletion, spam/honeypot/rate-limit/idempotency', () => {
   const badReport = validateAndCreateArticleReport('link-up-lucknow-01', 'Lucknow Bulletin', 'bad', REF_NOW);
   assert.equal(badReport.valid, false);
 
@@ -314,28 +363,134 @@ test('13. Report Article & Article Issue Feedback validators: sanitize strings, 
   );
   assert.equal(validReport.valid, true);
   assert.equal(validReport.entry?.articleId, 'link-up-lucknow-01');
-  assert.equal(validReport.entry?.timestamp, REF_NOW);
   assert.equal(validReport.entry?.reason.includes('<script>'), false);
 
-  const badFeedback = validateAndCreateArticleFeedback(
-    'link-state-imd-01',
-    'IMD Bulletin',
-    'invalid_type',
-    'Broken link to PDF',
-    REF_NOW
-  );
-  assert.equal(badFeedback.valid, false);
+  // Under 20 chars rejected
+  const shortFeedback = validateAndCreateArticleFeedback({
+    articleId: 'link-state-imd-01',
+    articleTitle: 'IMD Bulletin',
+    issueType: 'brokenLink',
+    description: 'Too short text',
+    nowIso: REF_NOW,
+  });
+  assert.equal(shortFeedback.valid, false);
+  assert.equal(shortFeedback.errorCode, 'description_too_short');
 
-  const validFeedback = validateAndCreateArticleFeedback(
-    'link-state-imd-01',
-    'IMD Bulletin',
-    'broken_link',
-    'The canonical forecast URL timed out during check.',
-    REF_NOW
-  );
+  // Over 2000 chars rejected
+  const longFeedback = validateAndCreateArticleFeedback({
+    articleId: 'link-state-imd-01',
+    articleTitle: 'IMD Bulletin',
+    issueType: 'inaccuracy',
+    description: 'a'.repeat(2005),
+    nowIso: REF_NOW,
+  });
+  assert.equal(longFeedback.valid, false);
+  assert.equal(longFeedback.errorCode, 'description_too_long');
+
+  // Honeypot spam rejected
+  const spamHoneypot = validateAndCreateArticleFeedback({
+    articleId: 'link-state-imd-01',
+    articleTitle: 'IMD Bulletin',
+    issueType: 'inaccuracy',
+    description: 'This is a valid length description for testing honeypot.',
+    honeypot: 'bot-filled-value',
+    nowIso: REF_NOW,
+  });
+  assert.equal(spamHoneypot.valid, false);
+  assert.equal(spamHoneypot.errorCode, 'spam_honeypot');
+
+  // Valid anonymous feedback (no contact) + script stripped
+  const seenTokens = new Set<string>();
+  const validFeedback = validateAndCreateArticleFeedback({
+    articleId: 'link-state-imd-01',
+    articleTitle: 'IMD Bulletin',
+    issueType: 'brokenLink',
+    description: 'The canonical forecast URL timed out during check <script>evil()</script>.',
+    contact: null,
+    idempotencyToken: 'token-fixed-001',
+    nowIso: REF_NOW,
+    seenIdempotencyTokens: seenTokens,
+  });
   assert.equal(validFeedback.valid, true);
   assert.equal(validFeedback.entry?.articleId, 'link-state-imd-01');
-  assert.equal(validFeedback.entry?.issueType, 'broken_link');
-  assert.equal(validFeedback.entry?.timestamp, REF_NOW);
+  assert.equal(validFeedback.entry?.issueType, 'brokenLink');
+  assert.equal(validFeedback.entry?.contact, null);
+  assert.equal(validFeedback.entry?.description.includes('<script>'), false);
+  assert.equal(validFeedback.entry?.reviewStatus, 'new');
+
+  // Idempotency duplicate retry rejected
+  const duplicateFeedback = validateAndCreateArticleFeedback({
+    articleId: 'link-state-imd-01',
+    articleTitle: 'IMD Bulletin',
+    issueType: 'brokenLink',
+    description: 'The canonical forecast URL timed out during check <script>evil()</script>.',
+    idempotencyToken: 'token-fixed-001',
+    nowIso: REF_NOW,
+    seenIdempotencyTokens: seenTokens,
+  });
+  assert.equal(duplicateFeedback.valid, false);
+  assert.equal(duplicateFeedback.errorCode, 'duplicate_retry');
+
+  // Optional contact deletion
+  const withContact = validateAndCreateArticleFeedback({
+    articleId: null,
+    articleTitle: 'General Feedback',
+    issueType: 'general',
+    description: 'General feedback from Help/Footer without an article ID attached.',
+    contact: 'reader@example.org',
+    nowIso: REF_NOW,
+  });
+  assert.equal(withContact.valid, true);
+  assert.equal(withContact.entry?.articleId, null);
+  assert.equal(withContact.entry?.contact, 'reader@example.org');
+
+  const strippedContact = deleteContactFromFeedbackRecord(withContact.entry!);
+  assert.equal(strippedContact.contact, null);
 });
 
+test('14. Stage 1 Honest Storage & Reviewer Queue Access Control (Spec v3 Page 8 Items 5, 8, 9)', async () => {
+  const fbInput = {
+    articleId: 'link-up-lucknow-01',
+    articleTitle: 'Lucknow Bulletin',
+    issueType: 'outdated',
+    description: 'The press release timestamp has been superseded by an evening update.',
+    nowIso: REF_NOW,
+  };
+
+  // Unconnected backend in Stage 1: remote submit is disabled, preserves local draft honestly
+  const stage1Submit = await submitFeedbackWithHonestStorage(fbInput, null);
+  assert.equal(stage1Submit.ok, false);
+  assert.equal(stage1Submit.remoteSubmitDisabled, true);
+  assert.equal(stage1Submit.record?.storageMode, 'local_draft_only');
+
+  // Connected backend simulation: network failure preserves local draft honestly
+  const failedNetworkSubmit = await submitFeedbackWithHonestStorage(fbInput, async () => {
+    throw new Error('503 Service Unavailable');
+  });
+  assert.equal(failedNetworkSubmit.ok, false);
+  assert.equal(failedNetworkSubmit.record?.storageMode, 'local_draft_only');
+  assert.equal(failedNetworkSubmit.errorCode, 'network_failure');
+
+  // Connected backend simulation: durable storage confirmed
+  const durableSuccess = await submitFeedbackWithHonestStorage(fbInput, async () => ({
+    stored: true,
+    receiptId: 'srv-receipt-101',
+  }));
+  assert.equal(durableSuccess.ok, true);
+  assert.equal(durableSuccess.record?.storageMode, 'durable_server');
+
+  // Reviewer queue access control: denies public/unauthenticated requests with 403
+  const publicAccess = verifyReviewerQueueAccess({
+    authenticated: false,
+    role: 'public',
+  });
+  assert.equal(publicAccess.allowed, false);
+  assert.equal(publicAccess.statusCode, 403);
+
+  const reviewerAccess = verifyReviewerQueueAccess({
+    authenticated: true,
+    role: 'editorial_reviewer',
+  });
+  assert.equal(reviewerAccess.allowed, true);
+  assert.equal(reviewerAccess.statusCode, 200);
+});

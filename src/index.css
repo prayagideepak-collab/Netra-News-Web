@@ -612,7 +612,7 @@ body.xr-session-ready #XRButtonWrapper {
   display: flex;
 }
 
-/* Source Verification Status Indicator Badges ('Verified', 'Pending Verification', 'Retracted') */
+/* Source Verification Status Indicator Badges ('Verified', 'Pending', 'Blocked') & Editorial State ('Retracted', 'Withheld') */
 .verification-badge {
   display: inline-flex;
   align-items: center;
@@ -639,12 +639,30 @@ body.xr-session-ready #XRButtonWrapper {
   background-color: rgba(245, 158, 11, 0.14);
 }
 
-.verification-badge[data-verification='retracted'] {
+.verification-badge[data-verification='blocked'],
+.verification-badge[data-verification='retracted'],
+.verification-badge[data-editorial-state='retracted'],
+.verification-badge[data-editorial-state='withheld'] {
   color: var(--status-danger);
   border-color: rgba(248, 113, 113, 0.65);
   background-color: rgba(248, 113, 113, 0.16);
   text-decoration: none;
 }
+
+.withheld-link-notice {
+  min-height: 44px;
+  padding: 8px 14px;
+  border-radius: 6px;
+  border: 1px dashed rgba(248, 113, 113, 0.65);
+  background-color: rgba(248, 113, 113, 0.1);
+  color: var(--status-danger);
+  font-size: 0.82rem;
+  font-weight: 600;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
 
 /* User Preferred Categories Bar & Drawer */
 .category-prefs-bar {

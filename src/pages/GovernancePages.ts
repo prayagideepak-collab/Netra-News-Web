@@ -17,7 +17,12 @@ import {
   PowerStateInput,
   PowerTier,
 } from '../domain/types';
-import { formatSourceTimestamp, getVerificationBadgeMeta } from '../domain/validation';
+import {
+  formatSourceTimestamp,
+  getEditorialStateBadgeMeta,
+  getVerificationBadgeMeta,
+  verifyReviewerQueueAccess,
+} from '../domain/validation';
 
 export function renderWeatherPage(
   lang: LanguageCode,
@@ -342,10 +347,15 @@ export function renderCorrectionsPage(
   articles: ArticleRecord[],
   drafts: CorrectionDraft[],
   articleReports: ArticleReportEntry[] = [],
-  articleFeedback: ArticleFeedbackEntry[] = []
+  articleFeedback: ArticleFeedbackEntry[] = [],
+  generalFeedbackState?: {
+    error: string | null;
+    notice: string | null;
+  }
 ): string {
   const isHi = lang === 'hi';
   const itemsWithCorrections = articles.filter((a) => a.corrections.length > 0);
+  const publicReviewerCheck = verifyReviewerQueueAccess(null);
 
   return `
     <section class="newspaper-section" style="margin-top:16px; border-top:none; padding-top:0;">
@@ -353,17 +363,156 @@ export function renderCorrectionsPage(
         <div>
           <h1 class="section-title">${
             isHi
-              ? 'संशोधन नीति, लेख रिपोर्ट एवं प्रतिक्रिया समीक्षा लॉग (Corrections, Reports & Feedback Log)'
-              : 'Corrections Policy, Article Reports & Feedback Review Log'
+              ? 'संशोधन नीति, सामान्य प्रतिक्रिया एवं समीक्षा लॉग (Corrections, General Feedback & Review Log)'
+              : 'Corrections Policy, General Feedback & Editorial Review Log'
           }</h1>
           <p class="section-subtitle">
             ${
               isHi
-                ? 'प्रत्येक संशोधन समय (correctedAt) और कारण (reason) के साथ स्थायी रूप से दृश्यमान रहता है। सभी उपयोगकर्ता रिपोर्ट और प्रतिक्रियाएं संपादकीय टीम द्वारा समीक्षा के लिए उपलब्ध हैं।'
-                : 'Corrections remain permanently visible with correctedAt and reason. All submitted article reports and issue feedback entries are logged below for editorial review.'
+                ? 'प्रत्येक संशोधन समय (correctedAt) और कारण (reason) के साथ स्थायी रूप से दृश्यमान रहता है। चरण 1 में निजी बैकएंड न जुड़ा होने के कारण रिमोट सबमिट अक्षम है और केवल आपके डिवाइस पर स्थानीय ड्राफ्ट सुरक्षित रहता है।'
+                : 'Corrections remain permanently visible with correctedAt and reason. In Stage 1, remote server submit is disabled with an honest unavailable notice while preserving optional local drafts on your device.'
             }
           </p>
         </div>
+      </div>
+
+      <!-- GENERAL FEEDBACK ENTRY POINT (Spec v3 Page 8 Item 1b: General feedback from Help/Settings/Footer) -->
+      <div class="state-banner" style="margin-top:16px;" id="general-feedback-section" data-testid="general-feedback-section">
+        <div style="display:flex; flex-wrap:wrap; align-items:center; justify-content:space-between; gap:8px;">
+          <h2 style="margin:0; font-size:1.15rem; font-family:var(--font-serif); color:var(--amber-400);">
+            💬 ${
+              isHi
+                ? 'सामान्य प्रतिक्रिया एवं सुझाव प्रपत्र (General Feedback — articleId: null)'
+                : 'General Feedback & Problem Report (articleId: null)'
+            }
+          </h2>
+          <span class="verification-badge" data-verification="pending">
+            ${isHi ? 'चरण 1: केवल स्थानीय ड्राफ्ट (Remote Submit Disabled)' : 'Stage 1: Local Draft Only (Remote Submit Disabled)'}
+          </span>
+        </div>
+
+        <p style="margin:8px 0 12px; font-size:0.86rem; color:var(--text-secondary);">
+          ${
+            isHi
+              ? 'बिना किसी खाते या संपर्क विवरण के प्रतिक्रिया दी जा सकती है। विवरण 20 से 2000 सादे अक्षरों के बीच होना चाहिए (HTML/स्क्रिप्ट स्वतः हटा दिए जाते हैं)।'
+              : 'You can submit feedback without an account or contact details. Description requires 20–2000 plain-text characters (active HTML/scripts are stripped).'
+          }
+        </p>
+
+        <form id="general-feedback-form">
+          <div style="display:none;" aria-hidden="true">
+            <label for="general-fb-honeypot">Leave empty</label>
+            <input type="text" id="general-fb-honeypot" name="honeypot" tabindex="-1" autocomplete="off" />
+          </div>
+
+          <div class="form-field-group">
+            <label for="general-fb-issue-type">
+              ${isHi ? 'प्रतिक्रिया प्रकार (Issue Type):' : 'Issue Type:'}
+            </label>
+            <select id="general-fb-issue-type" name="issueType">
+              <option value="general" selected>${isHi ? '1. सामान्य प्रतिक्रिया (General Feedback)' : '1. General Feedback (general)'}</option>
+              <option value="inaccuracy">${isHi ? '2. तथ्यगत त्रुटि (Inaccuracy)' : '2. Factual Inaccuracy (inaccuracy)'}</option>
+              <option value="brokenLink">${isHi ? '3. टूटा हुआ लिंक (Broken Link)' : '3. Broken Link (brokenLink)'}</option>
+              <option value="outdated">${isHi ? '4. पुरानी जानकारी (Outdated Info)' : '4. Outdated Information (outdated)'}</option>
+              <option value="other">${isHi ? '5. अन्य (Other)' : '5. Other (other)'}</option>
+            </select>
+          </div>
+
+          <div class="form-field-group">
+            <label for="general-fb-description">
+              ${
+                isHi
+                  ? 'विवरण (Description — अनिवार्य, 20 से 2000 अक्षर):'
+                  : 'Description (Required, 20–2000 plain-text characters):'
+              }
+            </label>
+            <textarea
+              id="general-fb-description"
+              name="description"
+              rows="3"
+              minlength="20"
+              maxlength="2000"
+              placeholder="${
+                isHi
+                  ? 'कम से कम 20 अक्षरों में अपनी प्रतिक्रिया या समस्या का विवरण लिखें (व्यक्तिगत या बच्चों का डेटा न लिखें)...'
+                  : 'Describe the issue or general feedback in 20–2000 characters (do not include personal or child data)...'
+              }"
+            ></textarea>
+          </div>
+
+          <div class="form-field-group">
+            <label for="general-fb-contact">
+              ${
+                isHi
+                  ? 'वैकल्पिक संपर्क (Optional Contact — अधिकतम 160 अक्षर, पूरी तरह वैकल्पिक):'
+                  : 'Optional Contact (Max 160 chars — leave blank for anonymous feedback):'
+              }
+            </label>
+            <input
+              type="text"
+              id="general-fb-contact"
+              name="contact"
+              maxlength="160"
+              placeholder="${
+                isHi
+                  ? 'वैकल्पिक: केवल फॉलो-अप के लिए (कभी भी हटाया जा सकता है)'
+                  : 'Optional: used only for follow-up if needed (deletable anytime)'
+              }"
+            />
+          </div>
+
+          <div style="margin-bottom:12px; padding:10px 12px; border-radius:6px; background:var(--navy-950); border:1px solid var(--border-subtle); font-size:0.78rem; color:var(--text-secondary);">
+            <strong>${isHi ? 'गोपनीयता एवं प्रतिधारण सूचना (Spec v3 §8.6–8.9):' : 'Privacy, Retention & Honest Stage 1 Storage Notice (Spec v3 §8.6–8.9):'}</strong>
+            <div style="margin-top:4px;">
+              ${
+                isHi
+                  ? '• वैकल्पिक संपर्क का उपयोग केवल फॉलो-अप के लिए होता है और इसे नीचे लॉग से 1-क्लिक में हटाया जा सकता है। विवरण में संवेदनशील व्यक्तिगत डेटा या बच्चों का संपर्क न लिखें। प्रस्तावित प्रतिधारण डिफ़ॉल्ट (लॉन्च से पहले अनुमोदन हेतु): समाधान के 30 दिनों के भीतर संपर्क हटाना; अनसुलझी प्रतिक्रिया 90 दिनों तक।'
+                  : '• Optional contact is used only for follow-up and can be deleted anytime below. Do not include personal data or child contact in descriptions. Proposed retention defaults (for owner approval before launch): delete optional contact within 30 days after resolution; unresolved feedback within 90 days.'
+              }
+            </div>
+          </div>
+
+          ${
+            generalFeedbackState?.error
+              ? `<div style="color:var(--status-danger); font-size:0.85rem; margin-bottom:10px; font-weight:600;" data-testid="general-feedback-error">
+                  ${generalFeedbackState.error}
+                </div>`
+              : ''
+          }
+          ${
+            generalFeedbackState?.notice
+              ? `<div style="color:var(--status-ok); font-size:0.85rem; margin-bottom:10px; font-weight:600;" data-testid="general-feedback-notice">
+                  ${generalFeedbackState.notice}
+                </div>`
+              : ''
+          }
+
+          <div style="display:flex; flex-wrap:wrap; align-items:center; gap:10px;">
+            <button
+              type="button"
+              disabled
+              aria-disabled="true"
+              class="btn-quiet"
+              style="opacity:0.65; cursor:not-allowed;"
+              data-testid="remote-general-submit-disabled-btn"
+              title="Private editorial storage is not connected in Stage 1"
+            >
+              ${
+                isHi
+                  ? '🔒 रिमोट सर्वर सबमिट अनुपलब्ध (Stage 1 Private Storage Not Connected)'
+                  : '🔒 Remote Server Submit Unavailable (Stage 1 Private Storage Not Connected)'
+              }
+            </button>
+
+            <button type="submit" class="btn-amber" id="submit-general-feedback-btn">
+              ${
+                isHi
+                  ? 'डिवाइस पर स्थानीय ड्राफ्ट सहेजें (Save Local Draft on Device)'
+                  : 'Save Local Feedback Draft on Device'
+              }
+            </button>
+          </div>
+        </form>
       </div>
 
       <div class="state-banner" style="margin-top:16px;">
@@ -380,18 +529,25 @@ export function renderCorrectionsPage(
                 }
               </p>`
             : itemsWithCorrections
-                .map(
-                  (art) => {
-                    const badge = getVerificationBadgeMeta(art.verificationStatus, lang);
-                    return `
+                .map((art) => {
+                  const badge = getVerificationBadgeMeta(art.verificationStatus, lang);
+                  const edBadge = getEditorialStateBadgeMeta(art.editorialState, lang);
+                  return `
                     <div style="padding:12px 0; border-top:1px solid var(--border-subtle);">
                       <div style="font-weight:700; display:flex; flex-wrap:wrap; align-items:center; gap:8px;">
                         <a href="/article/${art.id}" data-nav="/article/${art.id}">
                           ${isHi ? art.titleHi : art.title}
                         </a>
                         <span class="verification-badge" data-verification="${badge.status}">
-                          ${badge.displayLabel}
+                          Source verification: ${badge.displayLabel}
                         </span>
+                        ${
+                          art.editorialState !== 'active'
+                            ? `<span class="verification-badge" data-editorial-state="${art.editorialState}">
+                                Editorial: ${edBadge.displayLabel}
+                              </span>`
+                            : ''
+                        }
                       </div>
                       ${art.corrections
                         .map(
@@ -406,8 +562,7 @@ export function renderCorrectionsPage(
                         .join('')}
                     </div>
                   `;
-                  }
-                )
+                })
                 .join('')
         }
       </div>
@@ -416,15 +571,15 @@ export function renderCorrectionsPage(
         <h2 style="margin:0 0 8px; font-size:1.15rem; font-family:var(--font-serif);">
           ${
             isHi
-              ? 'दर्ज की गई लेख रिपोर्ट — संपादकीय समीक्षा कतार (Logged Article Reports for Editorial Review)'
-              : 'Logged Article Reports (Editorial Team Review Queue)'
+              ? 'दर्ज की गई लेख रिपोर्ट — स्थानीय डिवाइस लॉग (Local Article Reports on Device)'
+              : 'Logged Article Reports (On-Device Local Draft Queue)'
           }
         </h2>
         <p style="margin:0 0 12px; font-size:0.86rem; color:var(--text-secondary);">
           ${
             isHi
-              ? 'बिना लॉगिन के सबमिट की गई सभी लेख रिपोर्ट (Article ID, समय और कारण सहित) संपादकीय टीम की समीक्षा के लिए यहाँ दर्ज हैं।'
-              : 'Login-free reports submitted via "Report Article" on any article detail page, logged with Article ID, timestamp, and user-provided reason for editorial team review.'
+              ? 'बिना लॉगिन के सबमिट की गई सभी लेख रिपोर्ट (Article ID, समय और कारण सहित) इस डिवाइस पर संपादकीय समीक्षा के लिए सुरक्षित हैं।'
+              : 'Login-free reports submitted via "Report Article" on any article detail page, logged locally with Article ID, timestamp, and user-provided reason.'
           }
         </p>
         ${
@@ -444,7 +599,7 @@ export function renderCorrectionsPage(
                       <strong>Article ID: <code>${rep.articleId}</code></strong> —
                       <a href="/article/${rep.articleId}" data-nav="/article/${rep.articleId}">${rep.articleTitle}</a>
                       <span class="verification-badge" data-verification="pending" style="margin-left:6px;">
-                        ${isHi ? 'संपादकीय समीक्षाधीन' : 'Editorial Review Pending'}
+                        ${isHi ? 'स्थानीय ड्राफ्ट (Local Draft)' : 'Local Draft Only'}
                       </span>
                     </div>
                     <div style="color:var(--text-secondary); margin-top:4px;">
@@ -461,18 +616,23 @@ export function renderCorrectionsPage(
       </div>
 
       <div class="state-banner" style="margin-top:20px;" data-testid="corrections-feedback-log">
-        <h2 style="margin:0 0 8px; font-size:1.15rem; font-family:var(--font-serif);">
+        <div style="display:flex; flex-wrap:wrap; align-items:center; justify-content:space-between; gap:8px;">
+          <h2 style="margin:0; font-size:1.15rem; font-family:var(--font-serif);">
+            ${
+              isHi
+                ? 'लेख एवं सामान्य प्रतिक्रिया ड्राफ्ट लॉग (On-Device Feedback Drafts & Contact Deletion)'
+                : 'On-Device Feedback Drafts & Optional Contact Deletion'
+            }
+          </h2>
+          <span style="font-family:var(--font-mono); font-size:0.75rem; color:var(--amber-400);" data-testid="reviewer-queue-access-gate">
+            Reviewer Queue Gate: HTTP ${publicReviewerCheck.statusCode} (${publicReviewerCheck.allowed ? 'Allowed' : 'Denied for Public'})
+          </span>
+        </div>
+        <p style="margin:6px 0 12px; font-size:0.86rem; color:var(--text-secondary);">
           ${
             isHi
-              ? 'लेख प्रतिक्रिया एवं त्रुटि लॉग (Logged Article Issue Feedback)'
-              : 'Logged Article Issue Feedback (Inaccuracies, Broken Links & Outdated Info)'
-          }
-        </h2>
-        <p style="margin:0 0 12px; font-size:0.86rem; color:var(--text-secondary);">
-          ${
-            isHi
-              ? 'तथ्यगत त्रुटि, टूटे हुए लिंक या पुरानी जानकारी के बारे में उपयोगकर्ताओं द्वारा दर्ज की गई प्रतिक्रियाएं।'
-              : 'Structured feedback entries capturing Article ID, Issue Type, and user comments for editorial review.'
+              ? 'निजी समीक्षक कतार सार्वजनिक रूप से कभी प्रदर्शित नहीं की जाती। नीचे केवल आपके अपने डिवाइस पर सहेजे गए स्थानीय ड्राफ्ट दिख रहे हैं, जिनसे आप 1-क्लिक में वैकल्पिक संपर्क हटा सकते हैं।'
+              : 'The private reviewer queue is never publicly exposed (HTTP 403 for unauthenticated sessions). Below are only your own device-local drafts, with 1-click optional contact deletion.'
           }
         </p>
         ${
@@ -480,27 +640,61 @@ export function renderCorrectionsPage(
             ? `<p style="margin:0; color:var(--text-muted); font-size:0.88rem;">
                 ${
                   isHi
-                    ? 'अभी तक कोई लेख प्रतिक्रिया दर्ज नहीं की गई है।'
-                    : 'No article issue feedback recorded yet. Submit feedback from any article detail page.'
+                    ? 'अभी तक कोई प्रतिक्रिया ड्राफ्ट दर्ज नहीं किया गया है।'
+                    : 'No feedback drafts recorded on this device yet.'
                 }
               </p>`
             : `
               ${articleFeedback
                 .map(
                   (fb) => `
-                  <div style="padding:10px 0; border-top:1px solid var(--border-subtle); font-size:0.86rem;">
-                    <div>
-                      <strong>Article ID: <code>${fb.articleId}</code></strong> —
-                      <a href="/article/${fb.articleId}" data-nav="/article/${fb.articleId}">${fb.articleTitle}</a>
-                      <span class="category-chip active" style="margin-left:6px; padding:2px 8px; min-height:auto; font-size:0.75rem;">
+                  <div style="padding:10px 0; border-top:1px solid var(--border-subtle); font-size:0.86rem;" data-feedback-id="${fb.feedbackId || fb.id}">
+                    <div style="display:flex; flex-wrap:wrap; align-items:center; gap:8px;">
+                      <strong>Article ID: <code>${fb.articleId ?? 'null (General Feedback)'}</code></strong>
+                      ${
+                        fb.articleId
+                          ? `— <a href="/article/${fb.articleId}" data-nav="/article/${fb.articleId}">${fb.articleTitle}</a>`
+                          : `— <span>${fb.articleTitle}</span>`
+                      }
+                      <span class="category-chip active" style="padding:2px 8px; min-height:auto; font-size:0.75rem;">
                         Issue Type: ${fb.issueType}
                       </span>
+                      <span class="verification-badge" data-verification="pending">
+                        Review: ${fb.reviewStatus ?? 'new'} · ${fb.storageMode ?? 'local_draft_only'}
+                      </span>
                     </div>
-                    <div style="color:var(--text-secondary); margin-top:4px;">
-                      <strong>${isHi ? 'उपयोगकर्ता टिप्पणी (Comments):' : 'User Comments:'}</strong> ${fb.comments}
+                    <div style="color:var(--text-primary); margin-top:4px;">
+                      <strong>${isHi ? 'विवरण (Description):' : 'Description:'}</strong> ${fb.description || fb.comments || ''}
                     </div>
-                    <div style="font-family:var(--font-mono); font-size:0.75rem; color:var(--text-muted); margin-top:2px;">
-                      Timestamp: ${fb.timestamp} · Feedback ID: ${fb.id}
+                    ${
+                      fb.comments && fb.description && fb.comments !== fb.description
+                        ? `<div style="color:var(--text-secondary); margin-top:2px;">
+                            <strong>${isHi ? 'अतिरिक्त टिप्पणी (Comments):' : 'Comments:'}</strong> ${fb.comments}
+                          </div>`
+                        : ''
+                    }
+                    <div style="display:flex; flex-wrap:wrap; align-items:center; justify-content:space-between; gap:8px; margin-top:6px;">
+                      <div style="font-family:var(--font-mono); font-size:0.75rem; color:var(--text-muted);">
+                        Created: ${fb.createdAt || fb.timestamp} · ID: ${fb.feedbackId || fb.id} · Contact: ${
+                          fb.contact ? `[Saved: ${fb.contact}]` : 'None (Anonymous)'
+                        }
+                      </div>
+                      <div style="display:flex; gap:8px;">
+                        ${
+                          fb.contact
+                            ? `<button type="button" class="btn-quiet delete-feedback-contact-btn" data-feedback-id="${
+                                fb.feedbackId || fb.id
+                              }" style="min-height:32px; padding:4px 10px; font-size:0.75rem;">
+                                🗑️ ${isHi ? 'वैकल्पिक संपर्क हटाएं (Delete Contact)' : 'Delete Optional Contact'}
+                              </button>`
+                            : ''
+                        }
+                        <button type="button" class="btn-quiet delete-feedback-draft-btn" data-feedback-id="${
+                          fb.feedbackId || fb.id
+                        }" style="min-height:32px; padding:4px 10px; font-size:0.75rem;">
+                          ✕ ${isHi ? 'ड्राफ्ट हटाएं' : 'Delete Draft'}
+                        </button>
+                      </div>
                     </div>
                   </div>
                 `
@@ -716,6 +910,28 @@ export function renderAboutAndHandoffPage(
                 : 'Stage 1 implementation contract, assumptions & open decisions, feature gate, and Spatial XR Newsroom preview'
             }
           </p>
+        </div>
+      </div>
+
+      <div class="state-banner" style="margin-top:16px;" data-testid="repo-audit-packet">
+        <div class="article-kicker-meta">
+          <strong>AUDITED REPOSITORY &amp; BUILD SPECIFICATION v3 (6 NOV 2026 · 12:28 IST)</strong>
+          <span aria-hidden="true"> · </span>
+          <span>Target: 15 Nov 2026</span>
+        </div>
+        <div style="margin-top:8px; font-size:0.86rem; color:var(--text-secondary);">
+          <div>
+            <strong>${isHi ? 'ऑडिट किया गया रिपॉजिटरी संदर्भ (Audited Public Repo):' : 'Audited Public Repository:'}</strong>
+            <code>github.com/prayagideepak-collab/Netra-News-Web</code>
+            · <strong>Head Commit:</strong> <code>804931da1228cfbe3b1da8462ac9d95198db1fe4</code>
+          </div>
+          <div style="margin-top:4px;">
+            ${
+              isHi
+                ? 'यह कार्यान्वयन पहले के स्टैटिक प्रोटोटाइप के सभी कमियों को पूरा करता है: वास्तविक मार्ग (/local, /state, /national, /article/:id, /weather, /earthquakes, /sources, /corrections, /privacy, /about), स्रोत सत्यापन बैज (Verified | Pending | Blocked + अलग संपादकीय Retracted स्थिति), और ईमानदार चरण-1 स्थानीय ड्राफ्ट प्रतिक्रिया प्रणाली।'
+                : 'Replaces the static prototype audited at commit 804931da1228cfbe3b1da8462ac9d95198db1fe4 with real Stage 1 routes, schema validation, source verification indicators (Verified | Pending | Blocked + separate editorial Retracted state), and honest Stage 1 local-draft feedback with contact deletion.'
+            }
+          </div>
         </div>
       </div>
 

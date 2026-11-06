@@ -66,7 +66,13 @@ export const STAGE1_OFFICIAL_LINK_ENVELOPE: FeedEnvelope = {
       timezone: 'Asia/Kolkata',
       fetchedAt: '2026-11-06T05:45:00Z',
       verifiedAt: '2026-11-06T05:50:00Z',
+      verificationCheckedAt: '2026-11-06T05:50:00Z',
+      verificationReason:
+        'Official state government portal domain (information.up.gov.in) verified in allowlist; link-only reference mode.',
+      verificationReasonHi:
+        'आधिकारिक राज्य सरकार पोर्टल डोमेन (information.up.gov.in) अनुमति-सूची में सत्यापित; केवल लिंक संदर्भ मोड।',
       verificationStatus: 'verified',
+      editorialState: 'active',
       rightsStatus: 'linkOnly',
       permittedSummary:
         'Neutral link-out card to the official Uttar Pradesh Information Department portal. Full text is not copied or cached prior to written syndication verification.',
@@ -96,7 +102,13 @@ export const STAGE1_OFFICIAL_LINK_ENVELOPE: FeedEnvelope = {
       timezone: 'Asia/Kolkata',
       fetchedAt: '2026-11-06T05:45:00Z',
       verifiedAt: '2026-11-06T05:50:00Z',
+      verificationCheckedAt: '2026-11-06T05:50:00Z',
+      verificationReason:
+        'Official Government of India Press Information Bureau domain (pib.gov.in) verified in allowlist.',
+      verificationReasonHi:
+        'भारत सरकार के पत्र सूचना कार्यालय डोमेन (pib.gov.in) को अनुमति-सूची में सत्यापित किया गया।',
       verificationStatus: 'verified',
+      editorialState: 'active',
       rightsStatus: 'linkOnly',
       permittedSummary:
         'Neutral link-out reference to Press Information Bureau official feed index for New Delhi & NCR.',
@@ -126,7 +138,13 @@ export const STAGE1_OFFICIAL_LINK_ENVELOPE: FeedEnvelope = {
       timezone: 'Asia/Kolkata',
       fetchedAt: '2026-11-06T05:45:00Z',
       verifiedAt: '2026-11-06T05:50:00Z',
+      verificationCheckedAt: '2026-11-06T05:50:00Z',
+      verificationReason:
+        'Official IMD meteorological domain (mausam.imd.gov.in) verified in allowlist; link-only bulletin index.',
+      verificationReasonHi:
+        'आधिकारिक IMD मौसम विज्ञान डोमेन (mausam.imd.gov.in) अनुमति-सूची में सत्यापित; केवल लिंक बुलेटिन इंडेक्स।',
       verificationStatus: 'verified',
+      editorialState: 'active',
       rightsStatus: 'linkOnly',
       permittedSummary:
         'Direct link to IMD official forecast bulletin page. No live meteorological numbers are fabricated in Stage 1.',
@@ -162,7 +180,13 @@ export const STAGE1_OFFICIAL_LINK_ENVELOPE: FeedEnvelope = {
       timezone: 'Asia/Kolkata',
       fetchedAt: '2026-11-06T05:45:00Z',
       verifiedAt: '2026-11-06T05:50:00Z',
+      verificationCheckedAt: '2026-11-06T05:50:00Z',
+      verificationReason:
+        'Official National Disaster Management Authority domain (ndma.gov.in) verified in allowlist.',
+      verificationReasonHi:
+        'राष्ट्रीय आपदा प्रबंधन प्राधिकरण का आधिकारिक डोमेन (ndma.gov.in) अनुमति-सूची में सत्यापित।',
       verificationStatus: 'verified',
+      editorialState: 'active',
       rightsStatus: 'linkOnly',
       permittedSummary:
         'National fallback reference card linking to NDMA official portal. Displayed with full source attribution.',
@@ -192,7 +216,13 @@ export const STAGE1_OFFICIAL_LINK_ENVELOPE: FeedEnvelope = {
       timezone: 'Asia/Kolkata',
       fetchedAt: '2026-11-06T05:45:00Z',
       verifiedAt: '2026-11-06T05:50:00Z',
+      verificationCheckedAt: '2026-11-06T05:50:00Z',
+      verificationReason:
+        'Official National Center for Seismology domain (seismo.gov.in) verified in allowlist; link-only reference.',
+      verificationReasonHi:
+        'राष्ट्रीय भूकंप विज्ञान केंद्र का आधिकारिक डोमेन (seismo.gov.in) अनुमति-सूची में सत्यापित; केवल लिंक संदर्भ।',
       verificationStatus: 'verified',
+      editorialState: 'active',
       rightsStatus: 'linkOnly',
       permittedSummary:
         'Neutral link-out card to NCS official earthquake dashboard. Not an automated early-warning system.',
@@ -242,9 +272,11 @@ export const STAGE1_OFFICIAL_LINK_ENVELOPE: FeedEnvelope = {
 };
 
 /**
- * Specification Build Contract §3 TEST Fixture Envelope:
+ * Specification Build Contract §3 & v3 Page 7 TEST Fixture Envelope:
  * Explicitly marked TEST. Production validator (`isProduction: true`) MUST reject `test-001`
- * and all unverified/blocked/future-dated/HTML-injected records.
+ * and all unverified/pending/blocked/retracted/future-dated/HTML-injected records.
+ * In diagnostic mode (`isProduction: false`), demonstrates all 3 verificationStatus states
+ * (`verified`, `pending`, `blocked`) and separate `editorialState: 'retracted'`.
  */
 export const TEST_FIXTURE_ENVELOPE: FeedEnvelope = {
   schemaVersion: 1,
@@ -270,7 +302,13 @@ export const TEST_FIXTURE_ENVELOPE: FeedEnvelope = {
       timezone: 'Asia/Kolkata',
       fetchedAt: '2026-11-06T06:00:00Z',
       verifiedAt: null,
+      verificationCheckedAt: '2026-11-06T06:00:00Z',
+      verificationReason:
+        'TEST FIXTURE (id=test-001): publishedAt is null, verificationStatus=pending, rightsStatus=blocked.',
+      verificationReasonHi:
+        'TEST फिक्स्चर (id=test-001): publishedAt अनुपलब्ध है, verificationStatus=pending, rightsStatus=blocked।',
       verificationStatus: 'pending',
+      editorialState: 'withheld',
       rightsStatus: 'blocked',
       permittedSummary:
         'TEST FIXTURE ONLY (Build Contract §3): id=test-001; publishedAt=null; verificationStatus=pending; rightsStatus=blocked. Rejected automatically by production validator.',
@@ -291,7 +329,7 @@ export const TEST_FIXTURE_ENVELOPE: FeedEnvelope = {
     {
       id: 'test-002-future-time',
       title: 'TEST - future timestamp unverified example <script>alert(1)</script>',
-      titleHi: 'TEST - भविष्य का समय (असत्यापित) उदाहरण',
+      titleHi: 'TEST - भविष्य का समय (लंबित सत्यापन) उदाहरण',
       language: 'hi',
       category: 'TEST FIXTURE',
       categoryHi: 'परीक्षण फिक्स्चर',
@@ -300,19 +338,25 @@ export const TEST_FIXTURE_ENVELOPE: FeedEnvelope = {
       stateCode: 'UP',
       cityId: null,
       publisherId: 'imd-mausam',
-      publisher: 'TEST SOURCE',
-      publisherHi: 'TEST SOURCE',
+      publisher: 'TEST SOURCE (Pending Timestamp)',
+      publisherHi: 'TEST SOURCE (लंबित समय जांच)',
       sourceUrl: 'https://mausam.imd.gov.in/imd_latest/contents/all_india_forcast_bulletin.php',
       publishedAt: '2099-01-01T00:00:00Z',
       timezone: 'Asia/Kolkata',
       fetchedAt: '2026-11-06T06:00:00Z',
       verifiedAt: null,
+      verificationCheckedAt: '2026-11-06T06:00:00Z',
+      verificationReason:
+        'Pending: future source timestamp (2099-01-01) cannot be verified; automatically demoted to Pending and excluded from Breaking.',
+      verificationReasonHi:
+        'लंबित (Pending): भविष्य का स्रोत समय (2099-01-01) सत्यापित नहीं किया जा सकता; स्वतः Pending में रखा गया।',
       verificationStatus: 'verified',
+      editorialState: 'active',
       rightsStatus: 'linkOnly',
       permittedSummary:
-        'Tests HTML script tag stripping and automatic demotion of future source timestamps to pending/unverified.',
+        'Tests HTML script tag stripping and automatic demotion of future source timestamps to Pending (never Breaking).',
       permittedSummaryHi:
-        'HTML स्क्रिप्ट टैग हटाने और भविष्य के स्रोत समय को असत्यापित (pending) श्रेणी में रखने का परीक्षण।',
+        'HTML स्क्रिप्ट टैग हटाने और भविष्य के स्रोत समय को स्वतः लंबित (Pending) श्रेणी में रखने का परीक्षण।',
       isBreaking: true,
       corrections: [],
       expiry: null,
@@ -320,9 +364,46 @@ export const TEST_FIXTURE_ENVELOPE: FeedEnvelope = {
       isTestFixture: true,
     },
     {
-      id: 'test-003-retracted',
-      title: 'TEST - retracted source advisory example',
-      titleHi: 'TEST - वापस ली गई (Retracted) सूचना का परीक्षण उदाहरण',
+      id: 'test-003-blocked-source',
+      title: 'TEST - blocked unpermitted publisher & unsafe link example',
+      titleHi: 'TEST - अवरुद्ध (Blocked) प्रकाशक एवं असुरक्षित लिंक उदाहरण',
+      language: 'hi',
+      category: 'TEST FIXTURE',
+      categoryHi: 'परीक्षण फिक्स्चर',
+      scope: 'national',
+      countryCode: 'IN',
+      stateCode: null,
+      cityId: null,
+      publisherId: 'unverified-aggregator',
+      publisher: 'TEST SOURCE (Blocked Unpermitted Host)',
+      publisherHi: 'TEST SOURCE (अवरुद्ध स्रोत)',
+      sourceUrl: 'http://unverified-external-scraper.example.org/story',
+      publishedAt: '2026-11-05T10:00:00+05:30',
+      timezone: 'Asia/Kolkata',
+      fetchedAt: '2026-11-06T06:00:00Z',
+      verifiedAt: null,
+      verificationCheckedAt: '2026-11-06T06:00:00Z',
+      verificationReason:
+        'Blocked: publisher permission not granted and source URL is non-HTTPS / outside allowlist. Scraped body, media, and external URL are withheld.',
+      verificationReasonHi:
+        'अवरुद्ध (Blocked): प्रकाशक अनुमति प्राप्त नहीं है और स्रोत URL अनुमति-सूची से बाहर है। सामग्री और बाहरी लिंक रोक दिए गए हैं।',
+      verificationStatus: 'blocked',
+      editorialState: 'withheld',
+      rightsStatus: 'blocked',
+      permittedSummary:
+        'THIS SCRAPED SUMMARY MUST BE AUTOMATICALLY STRIPPED WHEN VERIFICATION STATUS IS BLOCKED.',
+      permittedSummaryHi:
+        'अवरुद्ध (Blocked) स्थिति में यह सारांश स्वतः हटा दिया जाना चाहिए।',
+      isBreaking: true,
+      corrections: [],
+      expiry: null,
+      licensedImage: null,
+      isTestFixture: true,
+    },
+    {
+      id: 'test-004-retracted',
+      title: 'TEST - retracted bulletin with separate editorialState',
+      titleHi: 'TEST - अलग संपादकीय स्थिति (Retracted) के साथ वापस लिया गया बुलेटिन',
       language: 'hi',
       category: 'TEST FIXTURE',
       categoryHi: 'परीक्षण फिक्स्चर',
@@ -332,18 +413,24 @@ export const TEST_FIXTURE_ENVELOPE: FeedEnvelope = {
       cityId: null,
       publisherId: 'ndma-india',
       publisher: 'TEST SOURCE (Retracted Notice)',
-      publisherHi: 'TEST SOURCE (वापस लिया गया स्रोत)',
+      publisherHi: 'TEST SOURCE (वापस लिया गया बुलेटिन)',
       sourceUrl: 'https://ndma.gov.in/',
       publishedAt: '2026-11-05T11:00:00+05:30',
       timezone: 'Asia/Kolkata',
       fetchedAt: '2026-11-06T06:00:00Z',
       verifiedAt: '2026-11-05T12:00:00Z',
-      verificationStatus: 'retracted',
+      verificationCheckedAt: '2026-11-05T14:00:00Z',
+      verificationReason:
+        'Source host (ndma.gov.in) was verified, and the item carries editorialState="retracted" with a logged correction record.',
+      verificationReasonHi:
+        'स्रोत डोमेन (ndma.gov.in) सत्यापित था, और इस प्रविष्टि पर संशोधन रिकॉर्ड के साथ संपादकीय स्थिति "वापस लिया गया (Retracted)" अंकित है।',
+      verificationStatus: 'verified',
+      editorialState: 'retracted',
       rightsStatus: 'linkOnly',
       permittedSummary:
-        'TEST FIXTURE ONLY: Demonstrates the Retracted verification status badge when a source bulletin is withdrawn.',
+        'TEST FIXTURE ONLY: Demonstrates separate editorialState="retracted" alongside source verificationStatus="verified" per Spec v3 Page 7.',
       permittedSummaryHi:
-        'केवल परीक्षण फिक्स्चर: जब कोई स्रोत बुलेटिन वापस ले लिया जाता है तो "वापस लिया गया (Retracted)" बैज प्रदर्शित करता है।',
+        'केवल परीक्षण फिक्स्चर: विनिर्देश v3 पृष्ठ 7 के अनुसार स्रोत सत्यापन स्थिति से अलग संपादकीय वापसी (Retracted) बैज प्रदर्शित करता है।',
       isBreaking: false,
       corrections: [
         {
@@ -743,11 +830,11 @@ export const FEATURE_MATRIX_ROWS: FeatureMatrixRow[] = [
 export const OPEN_DECISIONS_LIST: OpenDecisionItem[] = [
   {
     id: 'od-repo-deploy',
-    category: '1. Real Repository & Deployment Target',
+    category: '1. Real Repository & Deployment Target (Audited 6 Nov 2026 12:28 IST)',
     questionEn: 'Which exact GitHub repository URL and static hosting target (GitHub Pages vs free Cloudflare Pages) will serve as the primary production origin?',
     questionHi: 'कौन सा सटीक GitHub रिपॉजिटरी URL और निःशुल्क स्टैटिक होस्टिंग (GitHub Pages बनाम Cloudflare Pages) मुख्य प्रोडक्शन साइट होगी?',
     currentAssumption:
-      'Assumed static-first bundle deployable to free GitHub Pages with no custom domain dependency and zero paid cloud services.',
+      'Owner-supplied public repository github.com/prayagideepak-collab/Netra-News-Web audited at 12:28 IST on 6 Nov 2026 (head commit 804931da1228cfbe3b1da8462ac9d95198db1fe4). Assumed static-first bundle deployable to free GitHub Pages with no custom domain dependency and zero paid cloud services.',
     status: 'Open Decision',
   },
   {
@@ -788,11 +875,11 @@ export const OPEN_DECISIONS_LIST: OpenDecisionItem[] = [
   },
   {
     id: 'od-contact-correction',
-    category: '6. Contact & Correction Destination',
-    questionEn: 'What verified email address or moderated issue tracker should receive public correction requests and problem reports?',
-    questionHi: 'सुधार अनुरोधों और समस्या रिपोर्टों के लिए कौन सा सत्यापित ईमेल पता या इश्यू ट्रैकर उपयोग किया जाएगा?',
+    category: '6. Feedback Storage, Reviewer Access & Retention Defaults',
+    questionEn: 'Which private backend/issue store and reviewer authentication will receive feedback, and are the proposed retention windows (30 days for optional contact after resolution; 90 days for unresolved feedback) approved?',
+    questionHi: 'प्रतिक्रिया और सुधार रिपोर्टों के लिए कौन सा निजी समीक्षा बैकएंड उपयोग होगा, और क्या प्रस्तावित डेटा प्रतिधारण अवधि (संपर्क हेतु 30 दिन; अनसुलझी प्रतिक्रिया हेतु 90 दिन) अनुमोदित है?',
     currentAssumption:
-      'Stage 1 generates a structured, copyable correction report packet on-device without fabricating a live backend form or unverified email.',
+      'Stage 1 disables remote server submit with an honest unavailable message and preserves only local drafts on the user device with 1-click optional contact deletion.',
     status: 'Open Decision',
   },
   {
@@ -814,3 +901,4 @@ export const OPEN_DECISIONS_LIST: OpenDecisionItem[] = [
     status: 'Confirmed Stage 1 Safe Default',
   },
 ];
+

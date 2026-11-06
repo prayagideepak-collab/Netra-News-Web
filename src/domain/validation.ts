@@ -5,7 +5,9 @@ import {
   ArticleReportEntry,
   CircuitBreakerState,
   CityEntry,
+  EditorialState,
   FeedEnvelope,
+  FeedbackReviewStatus,
   LocationPreference,
   PowerStateInput,
   PowerTier,
@@ -242,18 +244,16 @@ export function validateFeedEnvelope(
       continue;
     }
 
-    // 3. Check verificationStatus and rightsStatus
-    const verificationStatus = rawItem?.verificationStatus;
-    const rightsStatus = rawItem?.rightsStatus;
+    // 3. Validate source publication time first (missing or future times cannot be verified)
+    const pubCheck = validateEventTimestamp(rawItem?.publishedAt, nowIso);
 
-    if (
-      verificationStatus !== 'verified' &&
-      verificationStatus !== 'pending' &&
-      verificationStatus !== 'retracted'
-    ) {
-      rejectedItems.push({ id: itemId, reason: 'invalid_verification_status' });
-      continue;
-    }
+    // 4. Normalize verificationStatus and editorialState per Spec v3 Page 7:
+    // Allowed verificationStatus values: 'verified' | 'pending' | 'blocked'.
+    // Missing, unknown, or malformed verificationStatus MUST fall back to 'pending', never 'verified'.
+    // Retraction is a separate editorialState ('active' | 'retracted' | 'withheld').
+    const rawVerStatus = rawItem?.verificationStatus as unknown;
+    const rawEdState = rawItem?.editorialState as unknown;
+    const rightsStatus = rawItem?.rightsStatus;
 
     if (
       rightsStatus !== 'linkOnly' &&
@@ -265,64 +265,96 @@ export function validateFeedEnvelope(
       continue;
     }
 
+    const normalizedVer = normalizeVerificationStatus(rawVerStatus, pubCheck.valid);
+    const verificationStatus: VerificationStatus = normalizedVer.status;
+    let editorialState: EditorialState = 'active';
+    if (rawEdState === 'retracted' || normalizedVer.editorialStateOverride === 'retracted') {
+      editorialState = 'retracted';
+    } else if (
+      rawEdState === 'withheld' ||
+      verificationStatus === 'blocked' ||
+      rightsStatus === 'blocked'
+    ) {
+      editorialState = 'withheld';
+    }
+
+    // 5. Validate canonical source URL against HTTPS and source allowlist
+    const urlCheck = validateHttpsCanonicalUrl(rawItem?.sourceUrl, allowlist);
+
     if (options.isProduction) {
+      if (normalizedVer.fallbackUsed) {
+        rejectedItems.push({ id: itemId, reason: 'invalid_or_demoted_verification_status' });
+        continue;
+      }
       if (verificationStatus !== 'verified') {
         rejectedItems.push({ id: itemId, reason: `unverified_status_${verificationStatus}` });
+        continue;
+      }
+      if (editorialState !== 'active') {
+        rejectedItems.push({ id: itemId, reason: `editorial_state_${editorialState}` });
         continue;
       }
       if (rightsStatus === 'blocked') {
         rejectedItems.push({ id: itemId, reason: 'rights_blocked' });
         continue;
       }
-    }
-
-    // 4. Validate canonical source URL against HTTPS and source allowlist
-    const urlCheck = validateHttpsCanonicalUrl(rawItem?.sourceUrl, allowlist);
-    if (!urlCheck.valid || !urlCheck.normalizedUrl) {
-      if (options.isProduction) {
+      if (!urlCheck.valid || !urlCheck.normalizedUrl) {
         rejectedItems.push({ id: itemId, reason: `invalid_source_url_${urlCheck.reason}` });
+        continue;
+      }
+      if (!pubCheck.valid) {
+        rejectedItems.push({ id: itemId, reason: `invalid_published_at_${pubCheck.reason}` });
+        continue;
+      }
+      if (isRecordExpired(rawItem?.expiry ?? null, nowIso)) {
+        rejectedItems.push({ id: itemId, reason: 'expired_record' });
         continue;
       }
     }
 
-    // 5. Validate source publication time (missing or future times cannot be verified)
-    const pubCheck = validateEventTimestamp(rawItem?.publishedAt, nowIso);
-    if (!pubCheck.valid && options.isProduction) {
-      rejectedItems.push({ id: itemId, reason: `invalid_published_at_${pubCheck.reason}` });
-      continue;
-    }
+    const isBlockedContent =
+      verificationStatus === 'blocked' ||
+      rightsStatus === 'blocked' ||
+      editorialState === 'withheld' ||
+      !urlCheck.valid;
 
-    // 6. Check expiry
-    if (isRecordExpired(rawItem?.expiry ?? null, nowIso) && options.isProduction) {
-      rejectedItems.push({ id: itemId, reason: 'expired_record' });
-      continue;
-    }
-
-    const normalizedUrl = urlCheck.normalizedUrl ?? sanitizeString(rawItem?.sourceUrl);
+    const normalizedUrl = isBlockedContent
+      ? ''
+      : urlCheck.normalizedUrl ?? sanitizeString(rawItem?.sourceUrl);
     const cleanPublisher = sanitizeString(rawItem?.publisher);
 
-    // 7. Consolidate duplicate canonical URLs without losing source attribution
-    const existingByUrl = urlToItemMap.get(normalizedUrl);
-    if (existingByUrl && normalizedUrl) {
-      existingByUrl.consolidatedSources = existingByUrl.consolidatedSources ?? [
-        { publisher: existingByUrl.publisher, sourceUrl: existingByUrl.sourceUrl },
-      ];
-      const alreadyListed = existingByUrl.consolidatedSources.some(
-        (s) => s.publisher === cleanPublisher && s.sourceUrl === normalizedUrl
-      );
-      if (!alreadyListed) {
-        existingByUrl.consolidatedSources.push({
-          publisher: cleanPublisher,
-          sourceUrl: normalizedUrl,
-        });
+    // 6. Consolidate duplicate canonical URLs without losing source attribution (for valid URLs)
+    if (normalizedUrl) {
+      const existingByUrl = urlToItemMap.get(normalizedUrl);
+      if (existingByUrl) {
+        existingByUrl.consolidatedSources = existingByUrl.consolidatedSources ?? [
+          { publisher: existingByUrl.publisher, sourceUrl: existingByUrl.sourceUrl },
+        ];
+        const alreadyListed = existingByUrl.consolidatedSources.some(
+          (s) => s.publisher === cleanPublisher && s.sourceUrl === normalizedUrl
+        );
+        if (!alreadyListed) {
+          existingByUrl.consolidatedSources.push({
+            publisher: cleanPublisher,
+            sourceUrl: normalizedUrl,
+          });
+        }
+        consolidatedCount += 1;
+        continue;
       }
-      consolidatedCount += 1;
-      continue;
     }
 
-    // 8. Enforce rights-safe summary rules: if linkOnly, strip long scraped extracts (> 180 chars)
-    let safeSummaryEn = rawItem?.permittedSummary ? sanitizeString(rawItem.permittedSummary) : null;
-    let safeSummaryHi = rawItem?.permittedSummaryHi ? sanitizeString(rawItem.permittedSummaryHi) : null;
+    // 7. Enforce rights-safe summary rules & Blocked content rules (Spec v3 Page 7 Item 4):
+    // Blocked content has NO scraped body/media and NO clickable unsafe URL.
+    let safeSummaryEn =
+      isBlockedContent || !rawItem?.permittedSummary
+        ? null
+        : sanitizeString(rawItem.permittedSummary);
+    let safeSummaryHi =
+      isBlockedContent || !rawItem?.permittedSummaryHi
+        ? null
+        : sanitizeString(rawItem.permittedSummaryHi);
+
     if (rightsStatus === 'linkOnly') {
       if (safeSummaryEn && safeSummaryEn.length > 180) {
         safeSummaryEn = safeSummaryEn.slice(0, 177) + '...';
@@ -331,6 +363,15 @@ export function validateFeedEnvelope(
         safeSummaryHi = safeSummaryHi.slice(0, 177) + '...';
       }
     }
+
+    const defaultVerReason =
+      verificationStatus === 'verified'
+        ? 'Canonical HTTPS publisher domain, source timestamp, and attribution verified against allowlist.'
+        : verificationStatus === 'blocked'
+          ? 'Blocked: source rights not granted or URL failed allowlist/HTTPS safety verification.'
+          : !pubCheck.valid
+            ? `Pending: source publication timestamp invalid or future (${pubCheck.reason ?? 'unknown'}).`
+            : 'Pending: publisher verification or timestamp confirmation in progress.';
 
     const sanitizedItem: ArticleRecord = {
       id: itemId,
@@ -347,20 +388,34 @@ export function validateFeedEnvelope(
       publisher: cleanPublisher,
       publisherHi: sanitizeString(rawItem?.publisherHi || rawItem?.publisher),
       sourceUrl: normalizedUrl,
+      sourceUrlWithheld: isBlockedContent,
       publishedAt: pubCheck.valid ? rawItem.publishedAt : null,
       timezone: sanitizeString(rawItem?.timezone || 'Asia/Kolkata'),
       fetchedAt: sanitizeString(rawItem?.fetchedAt || nowIso),
       verifiedAt: rawItem?.verifiedAt ? sanitizeString(rawItem.verifiedAt) : null,
-      verificationStatus:
-        verificationStatus === 'retracted'
-          ? 'retracted'
-          : pubCheck.valid
-            ? verificationStatus
-            : 'pending',
+      verificationCheckedAt: rawItem?.verificationCheckedAt
+        ? sanitizeString(rawItem.verificationCheckedAt)
+        : rawItem?.verifiedAt
+          ? sanitizeString(rawItem.verifiedAt)
+          : sanitizeString(rawItem?.fetchedAt || nowIso),
+      verificationReason: rawItem?.verificationReason
+        ? sanitizeString(rawItem.verificationReason)
+        : defaultVerReason,
+      verificationReasonHi: rawItem?.verificationReasonHi
+        ? sanitizeString(rawItem.verificationReasonHi)
+        : null,
+      verificationStatus,
+      editorialState,
       rightsStatus,
       permittedSummary: safeSummaryEn,
       permittedSummaryHi: safeSummaryHi,
-      isBreaking: Boolean(rawItem?.isBreaking) && verificationStatus === 'verified' && pubCheck.valid,
+      // Spec v3 Page 7 Item 4: Pending and Blocked content must NEVER appear in Breaking or Live.
+      isBreaking:
+        Boolean(rawItem?.isBreaking) &&
+        verificationStatus === 'verified' &&
+        editorialState === 'active' &&
+        !isBlockedContent &&
+        pubCheck.valid,
       corrections: Array.isArray(rawItem?.corrections)
         ? rawItem.corrections.map((c) => ({
             correctedAt: sanitizeString(c.correctedAt),
@@ -370,14 +425,16 @@ export function validateFeedEnvelope(
         : [],
       expiry: rawItem?.expiry ? sanitizeString(rawItem.expiry) : null,
       licensedImage:
-        rightsStatus === 'licensed' || rightsStatus === 'original'
+        !isBlockedContent && (rightsStatus === 'licensed' || rightsStatus === 'original')
           ? rawItem?.licensedImage ?? null
-          : null, // Never display unlicensed images in linkOnly mode
-      consolidatedSources: [{ publisher: cleanPublisher, sourceUrl: normalizedUrl }],
+          : null, // Never display unlicensed images in linkOnly mode or blocked mode
+      consolidatedSources: normalizedUrl ? [{ publisher: cleanPublisher, sourceUrl: normalizedUrl }] : [],
       isTestFixture: isTestRecord,
     };
 
-    urlToItemMap.set(normalizedUrl, sanitizedItem);
+    if (normalizedUrl) {
+      urlToItemMap.set(normalizedUrl, sanitizedItem);
+    }
     acceptedItems.push(sanitizedItem);
   }
 
@@ -388,6 +445,44 @@ export function validateFeedEnvelope(
     rejectedItems,
     consolidatedCount,
   };
+}
+
+/**
+ * Normalizes a raw verificationStatus value per Build Specification v3 (Page 7, Item 1 & Item 5):
+ * - Allowed enum values are 'verified' | 'pending' | 'blocked'.
+ * - Missing, unknown, or malformed verificationStatus MUST fall back to 'pending' (Pending), never 'verified'.
+ * - If 'verified' is supplied but publication timestamp is missing/future, demotes to 'pending'.
+ * - If legacy 'retracted' is supplied in verificationStatus, maps verificationStatus to 'pending' and sets editorialStateOverride = 'retracted'.
+ */
+export function normalizeVerificationStatus(
+  rawStatus: unknown,
+  pubTimeValid: boolean = true
+): {
+  status: VerificationStatus;
+  editorialStateOverride?: EditorialState;
+  fallbackUsed: boolean;
+} {
+  if (rawStatus === 'blocked') {
+    return { status: 'blocked', fallbackUsed: false };
+  }
+  if (rawStatus === 'pending') {
+    return { status: 'pending', fallbackUsed: false };
+  }
+  if (rawStatus === 'verified') {
+    if (!pubTimeValid) {
+      return { status: 'pending', fallbackUsed: true };
+    }
+    return { status: 'verified', fallbackUsed: false };
+  }
+  if (rawStatus === 'retracted') {
+    return {
+      status: 'pending',
+      editorialStateOverride: 'retracted',
+      fallbackUsed: true,
+    };
+  }
+  // Missing, unknown, or malformed status falls back to 'pending', never 'verified'
+  return { status: 'pending', fallbackUsed: true };
 }
 
 /**
@@ -619,7 +714,7 @@ export function formatSourceTimestamp(
 export interface VerificationBadgeMeta {
   status: VerificationStatus;
   icon: string;
-  labelEn: 'Verified' | 'Pending Verification' | 'Retracted';
+  labelEn: 'Verified' | 'Pending' | 'Blocked';
   labelHi: string;
   displayLabel: string;
   descriptionEn: string;
@@ -627,15 +722,17 @@ export interface VerificationBadgeMeta {
 }
 
 /**
- * Returns structured visual indicator metadata for a source/article verification status:
+ * Returns structured visual indicator metadata for a source/article verification status per Spec v3 Page 7:
  * - 'verified' -> 'Verified'
- * - 'pending' -> 'Pending Verification'
- * - 'retracted' -> 'Retracted'
+ * - 'pending' -> 'Pending' (also fallback for any missing/unknown/malformed status)
+ * - 'blocked' -> 'Blocked'
+ * Always pairs an icon + text label so meaning never relies only on color.
  */
 export function getVerificationBadgeMeta(
-  status: VerificationStatus,
+  rawStatus: unknown,
   lang: 'hi' | 'en' = 'hi'
 ): VerificationBadgeMeta {
+  const { status } = normalizeVerificationStatus(rawStatus, true);
   if (status === 'verified') {
     return {
       status: 'verified',
@@ -647,25 +744,76 @@ export function getVerificationBadgeMeta(
       descriptionHi: 'अनुमति-सूची के विरुद्ध कैननिकल स्रोत होस्ट, समय और श्रेय सत्यापित।',
     };
   }
-  if (status === 'retracted') {
+  if (status === 'blocked') {
     return {
-      status: 'retracted',
-      icon: '⚠',
-      labelEn: 'Retracted',
-      labelHi: 'वापस लिया गया (Retracted)',
-      displayLabel: lang === 'hi' ? '⚠ वापस लिया गया (Retracted)' : '⚠ Retracted',
-      descriptionEn: 'Withdrawn or retracted by the source publisher or editorial verification gate.',
-      descriptionHi: 'स्रोत प्रकाशक या संपादकीय जांच द्वारा वापस लिया गया (Retracted)।',
+      status: 'blocked',
+      icon: '⛔',
+      labelEn: 'Blocked',
+      labelHi: 'अवरुद्ध (Blocked)',
+      displayLabel: lang === 'hi' ? '⛔ अवरुद्ध (Blocked)' : '⛔ Blocked',
+      descriptionEn: 'Blocked: source rights not granted or URL failed allowlist/HTTPS safety verification. Body, media, and external link are withheld.',
+      descriptionHi: 'अवरुद्ध (Blocked): स्रोत अधिकार प्राप्त नहीं हैं या URL सुरक्षा जांच में विफल रहा। सामग्री और बाहरी लिंक रोके गए हैं।',
     };
   }
   return {
     status: 'pending',
     icon: '⏳',
-    labelEn: 'Pending Verification',
-    labelHi: 'सत्यापन लंबित (Pending Verification)',
-    displayLabel: lang === 'hi' ? '⏳ सत्यापन लंबित (Pending Verification)' : '⏳ Pending Verification',
+    labelEn: 'Pending',
+    labelHi: 'लंबित (Pending)',
+    displayLabel: lang === 'hi' ? '⏳ लंबित (Pending)' : '⏳ Pending',
     descriptionEn: 'Source timestamp or publisher permission is pending verification.',
-    descriptionHi: 'स्रोत समय या प्रकाशक अनुमति का सत्यापन लंबित है।',
+    descriptionHi: 'स्रोत समय या प्रकाशक अनुमति का सत्यापन लंबित (Pending) है।',
+  };
+}
+
+export interface EditorialStateBadgeMeta {
+  editorialState: EditorialState;
+  icon: string;
+  labelEn: 'Active' | 'Retracted' | 'Withheld';
+  labelHi: string;
+  displayLabel: string;
+  descriptionEn: string;
+  descriptionHi: string;
+}
+
+/**
+ * Returns structured visual indicator metadata for editorialState ('active' | 'retracted' | 'withheld'),
+ * which is separate from source verificationStatus per Spec v3 Page 7 Item 1.
+ */
+export function getEditorialStateBadgeMeta(
+  editorialState: EditorialState | undefined,
+  lang: 'hi' | 'en' = 'hi'
+): EditorialStateBadgeMeta {
+  if (editorialState === 'retracted') {
+    return {
+      editorialState: 'retracted',
+      icon: '⚠',
+      labelEn: 'Retracted',
+      labelHi: 'वापस लिया गया (Retracted)',
+      displayLabel: lang === 'hi' ? '⚠ वापस लिया गया (Retracted)' : '⚠ Retracted',
+      descriptionEn: 'Retracted by the publisher or editorial verification gate; preserved with correction history for transparency.',
+      descriptionHi: 'प्रकाशक या संपादकीय जांच द्वारा वापस लिया गया (Retracted); पारदर्शिता हेतु सुधार इतिहास के साथ सुरक्षित।',
+    };
+  }
+  if (editorialState === 'withheld') {
+    return {
+      editorialState: 'withheld',
+      icon: '⊘',
+      labelEn: 'Withheld',
+      labelHi: 'रोका गया (Withheld)',
+      displayLabel: lang === 'hi' ? '⊘ रोका गया (Withheld)' : '⊘ Withheld',
+      descriptionEn: 'Content and external link withheld due to blocked source rights or safety policy.',
+      descriptionHi: 'स्रोत अधिकार या सुरक्षा नीति के कारण सामग्री और बाहरी लिंक रोका गया (Withheld)।',
+    };
+  }
+  return {
+    editorialState: 'active',
+    icon: '●',
+    labelEn: 'Active',
+    labelHi: 'सक्रिय (Active)',
+    displayLabel: lang === 'hi' ? '● सक्रिय (Active)' : '● Active',
+    descriptionEn: 'Active editorial record.',
+    descriptionHi: 'सक्रिय संपादकीय रिकॉर्ड।',
   };
 }
 
@@ -799,66 +947,320 @@ export function validateAndCreateArticleReport(
       reason: cleanReason,
       timestamp: nowIso,
       reviewStatus: 'pending_editorial_review',
+      storageMode: 'local_draft_only',
     },
   };
 }
 
-const VALID_ISSUE_TYPES: ArticleIssueType[] = [
-  'inaccuracy',
-  'broken_link',
-  'outdated_info',
-  'attribution_issue',
-];
+const ISSUE_TYPE_ALIAS_MAP: Record<string, ArticleIssueType> = {
+  inaccuracy: 'inaccuracy',
+  brokenLink: 'brokenLink',
+  broken_link: 'brokenLink',
+  outdated: 'outdated',
+  outdated_info: 'outdated',
+  other: 'other',
+  attribution_issue: 'other',
+  general: 'general',
+};
+
+export interface FeedbackSubmissionInput {
+  articleId?: string | null;
+  articleTitle?: string | null;
+  issueType: unknown;
+  description: string;
+  comments?: string | null;
+  contact?: string | null;
+  honeypot?: string | null;
+  idempotencyToken?: string | null;
+  nowIso?: string;
+  lastSubmittedAtMs?: number | null;
+  seenIdempotencyTokens?: Set<string>;
+  cooldownMs?: number;
+}
 
 /**
- * Validates and constructs an ArticleFeedbackEntry capturing articleId, issueType, and user comments.
+ * Validates and constructs an ArticleFeedbackEntry per Build Specification v3 (Page 8, Items 1–9):
+ * - Supports both Article Issue reports (articleId prefilled) and General Feedback (articleId = null)
+ * - Validates issueType ('inaccuracy' | 'brokenLink' | 'outdated' | 'other' | 'general')
+ * - Requires description between 20 and 2000 plain-text characters (after stripping HTML/scripts)
+ * - Allows anonymous submission without account or contact; caps optional contact at 160 chars
+ * - Enforces spam controls: honeypot check, submission rate-limit cooldown, and idempotency token deduplication
  */
 export function validateAndCreateArticleFeedback(
-  articleId: string,
-  articleTitle: string,
-  rawIssueType: unknown,
-  rawComments: string,
-  nowIso: string = new Date().toISOString()
-): { valid: boolean; errorEn?: string; errorHi?: string; entry?: ArticleFeedbackEntry } {
-  const cleanId = sanitizeString(articleId);
-  const cleanTitle = sanitizeString(articleTitle) || 'Article';
-  const cleanComments = sanitizeString(rawComments);
+  articleIdOrInput: string | null | FeedbackSubmissionInput,
+  articleTitle?: string,
+  rawIssueType?: unknown,
+  rawDescription?: string,
+  nowIsoArg: string = new Date().toISOString(),
+  optionalFields?: {
+    comments?: string | null;
+    contact?: string | null;
+    honeypot?: string | null;
+    idempotencyToken?: string | null;
+    lastSubmittedAtMs?: number | null;
+    seenIdempotencyTokens?: Set<string>;
+    cooldownMs?: number;
+  }
+): {
+  valid: boolean;
+  errorCode?:
+    | 'spam_honeypot'
+    | 'rate_limited'
+    | 'duplicate_retry'
+    | 'invalid_issue_type'
+    | 'description_too_short'
+    | 'description_too_long'
+    | 'contact_too_long';
+  errorEn?: string;
+  errorHi?: string;
+  entry?: ArticleFeedbackEntry;
+} {
+  const input: FeedbackSubmissionInput =
+    typeof articleIdOrInput === 'object' && articleIdOrInput !== null
+      ? articleIdOrInput
+      : {
+          articleId: articleIdOrInput,
+          articleTitle: articleTitle ?? null,
+          issueType: rawIssueType,
+          description: rawDescription ?? '',
+          comments: optionalFields?.comments ?? null,
+          contact: optionalFields?.contact ?? null,
+          honeypot: optionalFields?.honeypot ?? null,
+          idempotencyToken: optionalFields?.idempotencyToken ?? null,
+          nowIso: nowIsoArg,
+          lastSubmittedAtMs: optionalFields?.lastSubmittedAtMs ?? null,
+          seenIdempotencyTokens: optionalFields?.seenIdempotencyTokens,
+          cooldownMs: optionalFields?.cooldownMs,
+        };
 
-  if (!cleanId) {
+  const nowIso = input.nowIso ?? new Date().toISOString();
+  const nowMs = Date.parse(nowIso) || Date.now();
+
+  // 1. Spam control: Honeypot field must be empty
+  if (typeof input.honeypot === 'string' && input.honeypot.trim().length > 0) {
     return {
       valid: false,
-      errorEn: 'Missing article ID for feedback.',
-      errorHi: 'प्रतिक्रिया के लिए लेख आईडी अनुपलब्ध है।',
+      errorCode: 'spam_honeypot',
+      errorEn: 'Automated spam submission rejected.',
+      errorHi: 'स्वचालित स्पैम सबमिशन अस्वीकार किया गया।',
     };
   }
 
-  if (typeof rawIssueType !== 'string' || !VALID_ISSUE_TYPES.includes(rawIssueType as ArticleIssueType)) {
+  // 2. Spam control: Rate-limit cooldown (default 10 seconds)
+  const cooldownMs = input.cooldownMs ?? 10000;
+  if (
+    typeof input.lastSubmittedAtMs === 'number' &&
+    nowMs - input.lastSubmittedAtMs >= 0 &&
+    nowMs - input.lastSubmittedAtMs < cooldownMs
+  ) {
     return {
       valid: false,
-      errorEn: 'Please select a valid issue type (Inaccuracy, Broken Link, Outdated Information, or Attribution Issue).',
-      errorHi: 'कृपया समस्या का सही प्रकार चुनें (तथ्यगत त्रुटि, टूटा हुआ लिंक, पुरानी जानकारी, या श्रेय समस्या)।',
+      errorCode: 'rate_limited',
+      errorEn: 'Please wait a few seconds before submitting another feedback report.',
+      errorHi: 'कृपया दूसरी प्रतिक्रिया भेजने से पहले कुछ सेकंड प्रतीक्षा करें।',
     };
   }
 
-  if (cleanComments.length < 5) {
+  // 3. Idempotency check: prevent duplicate submission retries
+  const cleanToken = sanitizeString(input.idempotencyToken) || `idem-${nowMs}-${Math.random().toString(36).slice(2, 7)}`;
+  if (input.seenIdempotencyTokens && input.seenIdempotencyTokens.has(cleanToken)) {
     return {
       valid: false,
-      errorEn: 'Please enter brief comments describing the issue (at least 5 characters).',
-      errorHi: 'कृपया समस्या का वर्णन करते हुए संक्षिप्त टिप्पणी लिखें (कम से कम 5 अक्षर)।',
+      errorCode: 'duplicate_retry',
+      errorEn: 'Duplicate submission ignored (idempotency token already recorded).',
+      errorHi: 'डुप्लिकेट सबमिशन अनदेखा किया गया (यह रिपोर्ट पहले ही दर्ज हो चुकी है)।',
     };
   }
+
+  // 4. Validate issueType
+  const mappedIssueType =
+    typeof input.issueType === 'string' ? ISSUE_TYPE_ALIAS_MAP[input.issueType.trim()] : undefined;
+  if (!mappedIssueType) {
+    return {
+      valid: false,
+      errorCode: 'invalid_issue_type',
+      errorEn: 'Please select a valid issue type (Inaccuracy, Broken Link, Outdated, Other, or General).',
+      errorHi: 'कृपया समस्या का सही प्रकार चुनें (तथ्यगत त्रुटि, टूटा हुआ लिंक, पुरानी जानकारी, अन्य, या सामान्य)।',
+    };
+  }
+
+  // 5. Sanitize and validate description (20-2000 plain-text characters per Spec v3 Page 8 Item 2)
+  const cleanDescription = sanitizeString(input.description);
+  if (cleanDescription.length < 20) {
+    return {
+      valid: false,
+      errorCode: 'description_too_short',
+      errorEn: `Description must be between 20 and 2000 plain-text characters (currently ${cleanDescription.length} characters).`,
+      errorHi: `विवरण 20 से 2000 सादे अक्षरों के बीच होना चाहिए (वर्तमान में ${cleanDescription.length} अक्षर)।`,
+    };
+  }
+  if (cleanDescription.length > 2000) {
+    return {
+      valid: false,
+      errorCode: 'description_too_long',
+      errorEn: `Description must not exceed 2000 characters (currently ${cleanDescription.length} characters).`,
+      errorHi: `विवरण 2000 अक्षरों से अधिक नहीं होना चाहिए (वर्तमान में ${cleanDescription.length} अक्षर)।`,
+    };
+  }
+
+  // 6. Optional comments & optional contact (anonymous allowed)
+  const cleanComments = input.comments ? sanitizeString(input.comments).slice(0, 1000) : null;
+  const cleanContact = input.contact ? sanitizeString(input.contact) : null;
+  if (cleanContact && cleanContact.length > 160) {
+    return {
+      valid: false,
+      errorCode: 'contact_too_long',
+      errorEn: 'Optional contact details must not exceed 160 characters.',
+      errorHi: 'वैकल्पिक संपर्क विवरण 160 अक्षरों से अधिक नहीं होना चाहिए।',
+    };
+  }
+
+  const cleanArticleId = input.articleId ? sanitizeString(input.articleId) : null;
+  const cleanArticleTitle = input.articleTitle
+    ? sanitizeString(input.articleTitle)
+    : cleanArticleId
+      ? 'Article Report'
+      : 'General Feedback';
+
+  const feedbackId = `fb-${nowMs}-${Math.random().toString(36).slice(2, 6)}`;
+  if (input.seenIdempotencyTokens) {
+    input.seenIdempotencyTokens.add(cleanToken);
+  }
+
+  const entry: ArticleFeedbackEntry = {
+    id: feedbackId,
+    feedbackId,
+    articleId: cleanArticleId || null,
+    articleTitle: cleanArticleTitle,
+    issueType: mappedIssueType,
+    description: cleanDescription,
+    comments: cleanComments || null,
+    contact: cleanContact || null,
+    createdAt: nowIso,
+    timestamp: nowIso,
+    reviewStatus: 'new',
+    reviewerNote: null,
+    resolvedAt: null,
+    idempotencyToken: cleanToken,
+    storageMode: 'local_draft_only',
+  };
 
   return {
     valid: true,
-    entry: {
-      id: `fb-${Date.parse(nowIso) || Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
-      articleId: cleanId,
-      articleTitle: cleanTitle,
-      issueType: rawIssueType as ArticleIssueType,
-      comments: cleanComments,
-      timestamp: nowIso,
-      reviewStatus: 'logged_for_review',
-    },
+    entry,
   };
 }
+
+/**
+ * Processes a validated feedback submission against an optional durable backend adapter.
+ * Per Spec v3 Page 8 Item 9:
+ * - If private storage is not connected (`durableAdapter === null`), returns `remoteSubmitDisabled: true`
+ *   with an honest unavailable message and preserves the local draft on the user device.
+ * - If a durable adapter is provided, awaits durable storage before returning success; on network/storage
+ *   failure, preserves the local draft and returns an honest failure state without faking success.
+ */
+export async function submitFeedbackWithHonestStorage(
+  input: FeedbackSubmissionInput,
+  durableAdapter: null | ((record: ArticleFeedbackEntry) => Promise<{ stored: boolean; receiptId?: string }>) = null
+): Promise<{
+  ok: boolean;
+  remoteSubmitDisabled: boolean;
+  statusMessageEn: string;
+  statusMessageHi: string;
+  record: ArticleFeedbackEntry | null;
+  errorCode?: string;
+}> {
+  const validation = validateAndCreateArticleFeedback(input);
+  if (!validation.valid || !validation.entry) {
+    return {
+      ok: false,
+      remoteSubmitDisabled: false,
+      statusMessageEn: validation.errorEn ?? 'Invalid feedback input.',
+      statusMessageHi: validation.errorHi ?? 'अमान्य प्रतिक्रिया इनपुट।',
+      record: null,
+      errorCode: validation.errorCode,
+    };
+  }
+
+  const draftRecord = validation.entry;
+
+  if (!durableAdapter) {
+    return {
+      ok: false,
+      remoteSubmitDisabled: true,
+      statusMessageEn:
+        'Private editorial review storage is not connected in Stage 1. Remote server submit is disabled; your report has been preserved only as a local draft on this device.',
+      statusMessageHi:
+        'चरण 1 में निजी संपादकीय समीक्षा स्टोरेज जुड़ा नहीं है। रिमोट सर्वर सबमिट अक्षम है; आपकी रिपोर्ट केवल इस डिवाइस पर स्थानीय ड्राफ्ट के रूप में सुरक्षित की गई है।',
+      record: { ...draftRecord, storageMode: 'local_draft_only' },
+    };
+  }
+
+  try {
+    const res = await durableAdapter(draftRecord);
+    if (!res.stored) {
+      return {
+        ok: false,
+        remoteSubmitDisabled: false,
+        statusMessageEn:
+          'Durable storage did not confirm receipt. Your report is preserved locally on this device so you can retry.',
+        statusMessageHi:
+          'स्थायी स्टोरेज ने प्राप्ति की पुष्टि नहीं की। आपकी रिपोर्ट इस डिवाइस पर सुरक्षित रखी गई है ताकि आप पुनः प्रयास कर सकें।',
+        record: { ...draftRecord, storageMode: 'local_draft_only' },
+        errorCode: 'storage_unconfirmed',
+      };
+    }
+    return {
+      ok: true,
+      remoteSubmitDisabled: false,
+      statusMessageEn: `Feedback durably recorded (${res.receiptId ?? draftRecord.feedbackId}).`,
+      statusMessageHi: `प्रतिक्रिया स्थायी रूप से दर्ज की गई (${res.receiptId ?? draftRecord.feedbackId})।`,
+      record: { ...draftRecord, storageMode: 'durable_server' },
+    };
+  } catch {
+    return {
+      ok: false,
+      remoteSubmitDisabled: false,
+      statusMessageEn:
+        'Network or storage error while sending feedback. Your draft has been preserved locally on this device.',
+      statusMessageHi:
+        'प्रतिक्रिया भेजते समय नेटवर्क या स्टोरेज त्रुटि। आपका ड्राफ्ट इस डिवाइस पर सुरक्षित रखा गया है।',
+      record: { ...draftRecord, storageMode: 'local_draft_only' },
+      errorCode: 'network_failure',
+    };
+  }
+}
+
+/**
+ * Removes optional contact information from a feedback record while preserving the anonymous issue report.
+ */
+export function deleteContactFromFeedbackRecord(record: ArticleFeedbackEntry): ArticleFeedbackEntry {
+  return {
+    ...record,
+    contact: null,
+  };
+}
+
+/**
+ * Enforces private reviewer queue access control per Spec v3 Page 8 Item 5:
+ * Never exposes the private reviewer queue publicly or to unauthenticated callers.
+ */
+export function verifyReviewerQueueAccess(authSession: {
+  authenticated?: boolean;
+  role?: string;
+} | null | undefined): { allowed: boolean; statusCode: 200 | 403; reason: string } {
+  if (!authSession || authSession.authenticated !== true || authSession.role !== 'editorial_reviewer') {
+    return {
+      allowed: false,
+      statusCode: 403,
+      reason: '403_FORBIDDEN_UNAUTHENTICATED_REVIEWER: Private reviewer queue is never publicly accessible.',
+    };
+  }
+  return {
+    allowed: true,
+    statusCode: 200,
+    reason: 'Authenticated editorial reviewer access verified.',
+  };
+}
+
 

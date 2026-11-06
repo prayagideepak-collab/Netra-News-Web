@@ -2,7 +2,9 @@ export type LanguageCode = 'hi' | 'en';
 
 export type NewsScope = 'local' | 'state' | 'national' | 'world';
 
-export type VerificationStatus = 'verified' | 'pending' | 'retracted';
+export type VerificationStatus = 'verified' | 'pending' | 'blocked';
+
+export type EditorialState = 'active' | 'retracted' | 'withheld';
 
 export type RightsStatus = 'linkOnly' | 'licensed' | 'original' | 'blocked';
 
@@ -41,11 +43,16 @@ export interface ArticleRecord {
   publisher: string;
   publisherHi: string;
   sourceUrl: string;
+  sourceUrlWithheld?: boolean;
   publishedAt: string | null;
   timezone: string;
   fetchedAt: string;
   verifiedAt: string | null;
+  verificationCheckedAt: string | null;
+  verificationReason: string | null;
+  verificationReasonHi?: string | null;
   verificationStatus: VerificationStatus;
+  editorialState: EditorialState;
   rightsStatus: RightsStatus;
   permittedSummary: string | null;
   permittedSummaryHi: string | null;
@@ -236,9 +243,12 @@ export interface UserCategoryPreferences {
 
 export type ArticleIssueType =
   | 'inaccuracy'
-  | 'broken_link'
-  | 'outdated_info'
-  | 'attribution_issue';
+  | 'brokenLink'
+  | 'outdated'
+  | 'other'
+  | 'general';
+
+export type FeedbackReviewStatus = 'new' | 'inReview' | 'resolved' | 'rejected';
 
 export interface ArticleReportEntry {
   id: string;
@@ -247,15 +257,25 @@ export interface ArticleReportEntry {
   reason: string;
   timestamp: string;
   reviewStatus: 'pending_editorial_review';
+  storageMode: 'local_draft_only' | 'durable_server';
 }
 
 export interface ArticleFeedbackEntry {
   id: string;
-  articleId: string;
+  feedbackId: string;
+  articleId: string | null;
   articleTitle: string;
   issueType: ArticleIssueType;
-  comments: string;
+  description: string;
+  comments: string | null;
+  contact: string | null;
+  createdAt: string;
   timestamp: string;
-  reviewStatus: 'logged_for_review';
+  reviewStatus: FeedbackReviewStatus;
+  reviewerNote: string | null;
+  resolvedAt: string | null;
+  idempotencyToken: string;
+  storageMode: 'local_draft_only' | 'durable_server';
 }
+
 
