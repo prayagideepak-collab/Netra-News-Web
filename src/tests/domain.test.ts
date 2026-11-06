@@ -3,11 +3,15 @@ import assert from 'node:assert/strict';
 import {
   evaluatePowerTier,
   formatSourceTimestamp,
+  getVerificationBadgeMeta,
   isRecordExpired,
   MAX_SELF_HEAL_RETRIES,
+  prioritizeArticlesByPreferences,
   recordFailureAndAdvanceCircuit,
   resolveCityFromTransientCoords,
   sanitizeString,
+  validateAndCreateArticleFeedback,
+  validateAndCreateArticleReport,
   validateEventTimestamp,
   validateFeedEnvelope,
   validateHttpsCanonicalUrl,
@@ -19,6 +23,7 @@ import {
   STAGE1_OFFICIAL_LINK_ENVELOPE,
   TEST_FIXTURE_ENVELOPE,
 } from '../data/feedsData';
+import { DEFAULT_LOCATION_PREFERENCE } from '../data/storage';
 import { CircuitBreakerState } from '../domain/types';
 
 const REF_NOW = '2026-11-06T06:00:00Z';
@@ -112,13 +117,17 @@ test('5. TEST fixture contract (test-001): strictly rejected in production, insp
     isProduction: false,
     referenceNowIso: REF_NOW,
   });
-  assert.equal(devTestResult.acceptedItems.length, 2);
+  assert.equal(devTestResult.acceptedItems.length, 3);
   // Future timestamp item must have its verificationStatus demoted to 'pending' and script stripped
   const secondItem = devTestResult.acceptedItems.find((i) => i.id === 'test-002-future-time');
   assert.ok(secondItem);
   assert.equal(secondItem.verificationStatus, 'pending');
   assert.equal(secondItem.isBreaking, false);
   assert.equal(secondItem.title.includes('<script>'), false);
+
+  const retractedItem = devTestResult.acceptedItems.find((i) => i.id === 'test-003-retracted');
+  assert.ok(retractedItem);
+  assert.equal(retractedItem.verificationStatus, 'retracted');
 });
 
 test('6. Duplicate IDs and duplicate canonical URLs: rejects duplicate IDs and consolidates duplicate URLs', () => {
@@ -258,3 +267,75 @@ test('10. Self-healing exponential backoff and circuit breaker cap', () => {
   assert.equal(tripped.deferredToNextWindow, true);
   assert.equal(tripped.backoffMs, null);
 });
+
+test('11. Verification status visual indicator metadata: maps verified, pending, and retracted accurately', () => {
+  const vBadge = getVerificationBadgeMeta('verified', 'en');
+  assert.equal(vBadge.labelEn, 'Verified');
+  assert.match(vBadge.displayLabel, /Verified/);
+
+  const pBadge = getVerificationBadgeMeta('pending', 'en');
+  assert.equal(pBadge.labelEn, 'Pending Verification');
+  assert.match(pBadge.displayLabel, /Pending Verification/);
+
+  const rBadge = getVerificationBadgeMeta('retracted', 'en');
+  assert.equal(rBadge.labelEn, 'Retracted');
+  assert.match(rBadge.displayLabel, /Retracted/);
+});
+
+test('12. User category preferences: prioritizes and orders articles matching selected categories', () => {
+  const validItems = validateFeedEnvelope(STAGE1_OFFICIAL_LINK_ENVELOPE, SOURCE_ALLOWLIST_LEDGER, {
+    isProduction: true,
+    referenceNowIso: REF_NOW,
+  }).acceptedItems;
+
+  // Prioritize 'earthquakes' and 'weather' only
+  const prioritized = prioritizeArticlesByPreferences(
+    validItems,
+    ['earthquakes', 'weather'],
+    DEFAULT_LOCATION_PREFERENCE
+  );
+
+  assert.equal(prioritized.prioritizedItems.length, 2);
+  // Earthquakes was listed first in selectedCategories, so NCS earthquake item comes first
+  assert.equal(prioritized.prioritizedItems[0].id, 'link-national-ncs-01');
+  assert.equal(prioritized.prioritizedItems[1].id, 'link-state-imd-01');
+  assert.ok(prioritized.secondaryItems.length >= 2);
+});
+
+test('13. Report Article & Article Issue Feedback validators: sanitize strings, capture IDs/timestamps, and reject invalid input', () => {
+  const badReport = validateAndCreateArticleReport('link-up-lucknow-01', 'Lucknow Bulletin', 'bad', REF_NOW);
+  assert.equal(badReport.valid, false);
+
+  const validReport = validateAndCreateArticleReport(
+    'link-up-lucknow-01',
+    'Lucknow Bulletin',
+    'Please verify updated district link <script>alert(1)</script>',
+    REF_NOW
+  );
+  assert.equal(validReport.valid, true);
+  assert.equal(validReport.entry?.articleId, 'link-up-lucknow-01');
+  assert.equal(validReport.entry?.timestamp, REF_NOW);
+  assert.equal(validReport.entry?.reason.includes('<script>'), false);
+
+  const badFeedback = validateAndCreateArticleFeedback(
+    'link-state-imd-01',
+    'IMD Bulletin',
+    'invalid_type',
+    'Broken link to PDF',
+    REF_NOW
+  );
+  assert.equal(badFeedback.valid, false);
+
+  const validFeedback = validateAndCreateArticleFeedback(
+    'link-state-imd-01',
+    'IMD Bulletin',
+    'broken_link',
+    'The canonical forecast URL timed out during check.',
+    REF_NOW
+  );
+  assert.equal(validFeedback.valid, true);
+  assert.equal(validFeedback.entry?.articleId, 'link-state-imd-01');
+  assert.equal(validFeedback.entry?.issueType, 'broken_link');
+  assert.equal(validFeedback.entry?.timestamp, REF_NOW);
+});
+

@@ -8,14 +8,16 @@ import {
 import { SOURCE_ALLOWLIST_LEDGER } from '../data/sourcesLedger';
 import { CorrectionDraft, DiagnosticLogEntry } from '../data/storage';
 import {
+  ArticleFeedbackEntry,
   ArticleRecord,
+  ArticleReportEntry,
   CircuitBreakerState,
   LanguageCode,
   LocationPreference,
   PowerStateInput,
   PowerTier,
 } from '../domain/types';
-import { formatSourceTimestamp } from '../domain/validation';
+import { formatSourceTimestamp, getVerificationBadgeMeta } from '../domain/validation';
 
 export function renderWeatherPage(
   lang: LanguageCode,
@@ -338,7 +340,9 @@ export function renderSourcesLedgerPage(lang: LanguageCode): string {
 export function renderCorrectionsPage(
   lang: LanguageCode,
   articles: ArticleRecord[],
-  drafts: CorrectionDraft[]
+  drafts: CorrectionDraft[],
+  articleReports: ArticleReportEntry[] = [],
+  articleFeedback: ArticleFeedbackEntry[] = []
 ): string {
   const isHi = lang === 'hi';
   const itemsWithCorrections = articles.filter((a) => a.corrections.length > 0);
@@ -348,13 +352,15 @@ export function renderCorrectionsPage(
       <div class="section-header-row">
         <div>
           <h1 class="section-title">${
-            isHi ? 'संशोधन नीति एवं पारदर्शी लॉग (Corrections & Updates)' : 'Corrections Policy & Transparent Log'
+            isHi
+              ? 'संशोधन नीति, लेख रिपोर्ट एवं प्रतिक्रिया समीक्षा लॉग (Corrections, Reports & Feedback Log)'
+              : 'Corrections Policy, Article Reports & Feedback Review Log'
           }</h1>
           <p class="section-subtitle">
             ${
               isHi
-                ? 'प्रत्येक संशोधन समय (correctedAt) और कारण (reason) के साथ स्थायी रूप से दृश्यमान रहता है।'
-                : 'Corrections remain permanently visible with correctedAt timestamp and reason.'
+                ? 'प्रत्येक संशोधन समय (correctedAt) और कारण (reason) के साथ स्थायी रूप से दृश्यमान रहता है। सभी उपयोगकर्ता रिपोर्ट और प्रतिक्रियाएं संपादकीय टीम द्वारा समीक्षा के लिए उपलब्ध हैं।'
+                : 'Corrections remain permanently visible with correctedAt and reason. All submitted article reports and issue feedback entries are logged below for editorial review.'
             }
           </p>
         </div>
@@ -375,24 +381,78 @@ export function renderCorrectionsPage(
               </p>`
             : itemsWithCorrections
                 .map(
-                  (art) => `
-                  <div style="padding:12px 0; border-top:1px solid var(--border-subtle);">
-                    <div style="font-weight:700;">
-                      <a href="/article/${art.id}" data-nav="/article/${art.id}">
-                        ${isHi ? art.titleHi : art.title}
-                      </a>
+                  (art) => {
+                    const badge = getVerificationBadgeMeta(art.verificationStatus, lang);
+                    return `
+                    <div style="padding:12px 0; border-top:1px solid var(--border-subtle);">
+                      <div style="font-weight:700; display:flex; flex-wrap:wrap; align-items:center; gap:8px;">
+                        <a href="/article/${art.id}" data-nav="/article/${art.id}">
+                          ${isHi ? art.titleHi : art.title}
+                        </a>
+                        <span class="verification-badge" data-verification="${badge.status}">
+                          ${badge.displayLabel}
+                        </span>
+                      </div>
+                      ${art.corrections
+                        .map(
+                          (c) => `
+                          <div style="font-family:var(--font-mono); font-size:0.8rem; color:var(--amber-400); margin-top:4px;">
+                            Corrected At: ${formatSourceTimestamp(c.correctedAt, lang)} — ${
+                              isHi ? c.reasonHi || c.reason : c.reason
+                            }
+                          </div>
+                        `
+                        )
+                        .join('')}
                     </div>
-                    ${art.corrections
-                      .map(
-                        (c) => `
-                        <div style="font-family:var(--font-mono); font-size:0.8rem; color:var(--amber-400); margin-top:4px;">
-                          Corrected At: ${formatSourceTimestamp(c.correctedAt, lang)} — ${
-                            isHi ? c.reasonHi || c.reason : c.reason
-                          }
-                        </div>
-                      `
-                      )
-                      .join('')}
+                  `;
+                  }
+                )
+                .join('')
+        }
+      </div>
+
+      <div class="state-banner" style="margin-top:20px;" data-testid="corrections-reports-log">
+        <h2 style="margin:0 0 8px; font-size:1.15rem; font-family:var(--font-serif);">
+          ${
+            isHi
+              ? 'दर्ज की गई लेख रिपोर्ट — संपादकीय समीक्षा कतार (Logged Article Reports for Editorial Review)'
+              : 'Logged Article Reports (Editorial Team Review Queue)'
+          }
+        </h2>
+        <p style="margin:0 0 12px; font-size:0.86rem; color:var(--text-secondary);">
+          ${
+            isHi
+              ? 'बिना लॉगिन के सबमिट की गई सभी लेख रिपोर्ट (Article ID, समय और कारण सहित) संपादकीय टीम की समीक्षा के लिए यहाँ दर्ज हैं।'
+              : 'Login-free reports submitted via "Report Article" on any article detail page, logged with Article ID, timestamp, and user-provided reason for editorial team review.'
+          }
+        </p>
+        ${
+          articleReports.length === 0
+            ? `<p style="margin:0; color:var(--text-muted); font-size:0.88rem;">
+                ${
+                  isHi
+                    ? 'अभी तक कोई लेख रिपोर्ट दर्ज नहीं की गई है। किसी भी लेख विवरण पृष्ठ पर "लेख की रिपोर्ट करें (Report Article)" बटन का उपयोग करें।'
+                    : 'No article reports logged yet. Use the "Report Article" button on any article detail page.'
+                }
+              </p>`
+            : articleReports
+                .map(
+                  (rep) => `
+                  <div style="padding:10px 0; border-top:1px solid var(--border-subtle); font-size:0.86rem;">
+                    <div>
+                      <strong>Article ID: <code>${rep.articleId}</code></strong> —
+                      <a href="/article/${rep.articleId}" data-nav="/article/${rep.articleId}">${rep.articleTitle}</a>
+                      <span class="verification-badge" data-verification="pending" style="margin-left:6px;">
+                        ${isHi ? 'संपादकीय समीक्षाधीन' : 'Editorial Review Pending'}
+                      </span>
+                    </div>
+                    <div style="color:var(--text-secondary); margin-top:4px;">
+                      <strong>${isHi ? 'रिपोर्ट का कारण (Reason):' : 'Reported Reason:'}</strong> ${rep.reason}
+                    </div>
+                    <div style="font-family:var(--font-mono); font-size:0.75rem; color:var(--text-muted); margin-top:2px;">
+                      Timestamp: ${rep.timestamp} · Report ID: ${rep.id}
+                    </div>
                   </div>
                 `
                 )
@@ -400,31 +460,53 @@ export function renderCorrectionsPage(
         }
       </div>
 
-      <div class="state-banner" style="margin-top:20px;">
+      <div class="state-banner" style="margin-top:20px;" data-testid="corrections-feedback-log">
         <h2 style="margin:0 0 8px; font-size:1.15rem; font-family:var(--font-serif);">
           ${
             isHi
-              ? 'डिवाइस पर सहेजे गए समस्या / सुधार ड्राफ्ट (On-Device Problem Reports)'
-              : 'On-Device Saved Correction / Problem Report Packets'
+              ? 'लेख प्रतिक्रिया एवं त्रुटि लॉग (Logged Article Issue Feedback)'
+              : 'Logged Article Issue Feedback (Inaccuracies, Broken Links & Outdated Info)'
           }
         </h2>
         <p style="margin:0 0 12px; font-size:0.86rem; color:var(--text-secondary);">
           ${
             isHi
-              ? 'सार्वजनिक फॉर्म/रेटिंग के लिए स्वीकृत बैकएंड और दुरुपयोग-रोधी नीति आवश्यक है (चरण 4)। तब तक आपकी रिपोर्ट आपके डिवाइस पर सुरक्षित रूप से तैयार होती है।'
-              : 'Public forms require an approved backend and abuse policy (Stage 4). Until then, problem reports are structured locally so you can copy and send them.'
+              ? 'तथ्यगत त्रुटि, टूटे हुए लिंक या पुरानी जानकारी के बारे में उपयोगकर्ताओं द्वारा दर्ज की गई प्रतिक्रियाएं।'
+              : 'Structured feedback entries capturing Article ID, Issue Type, and user comments for editorial review.'
           }
         </p>
         ${
-          drafts.length === 0
+          articleFeedback.length === 0 && drafts.length === 0
             ? `<p style="margin:0; color:var(--text-muted); font-size:0.88rem;">
                 ${
                   isHi
-                    ? 'अभी तक कोई समस्या रिपोर्ट ड्राफ्ट नहीं बनाई गई है। किसी भी लेख कार्ड पर "समस्या रिपोर्ट करें" पर क्लिक करें।'
-                    : 'No problem report drafts recorded yet. Open any article detail page to create one.'
+                    ? 'अभी तक कोई लेख प्रतिक्रिया दर्ज नहीं की गई है।'
+                    : 'No article issue feedback recorded yet. Submit feedback from any article detail page.'
                 }
               </p>`
-            : drafts
+            : `
+              ${articleFeedback
+                .map(
+                  (fb) => `
+                  <div style="padding:10px 0; border-top:1px solid var(--border-subtle); font-size:0.86rem;">
+                    <div>
+                      <strong>Article ID: <code>${fb.articleId}</code></strong> —
+                      <a href="/article/${fb.articleId}" data-nav="/article/${fb.articleId}">${fb.articleTitle}</a>
+                      <span class="category-chip active" style="margin-left:6px; padding:2px 8px; min-height:auto; font-size:0.75rem;">
+                        Issue Type: ${fb.issueType}
+                      </span>
+                    </div>
+                    <div style="color:var(--text-secondary); margin-top:4px;">
+                      <strong>${isHi ? 'उपयोगकर्ता टिप्पणी (Comments):' : 'User Comments:'}</strong> ${fb.comments}
+                    </div>
+                    <div style="font-family:var(--font-mono); font-size:0.75rem; color:var(--text-muted); margin-top:2px;">
+                      Timestamp: ${fb.timestamp} · Feedback ID: ${fb.id}
+                    </div>
+                  </div>
+                `
+                )
+                .join('')}
+              ${drafts
                 .map(
                   (d) => `
                   <div style="padding:10px 0; border-top:1px solid var(--border-subtle); font-size:0.85rem;">
@@ -436,7 +518,8 @@ export function renderCorrectionsPage(
                   </div>
                 `
                 )
-                .join('')
+                .join('')}
+            `
         }
       </div>
     </section>

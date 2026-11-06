@@ -218,3 +218,44 @@ export interface OpenDecisionItem {
   currentAssumption: string;
   status: 'Open Decision' | 'Confirmed Stage 1 Safe Default';
 }
+
+export type PreferredCategoryKey =
+  | 'local'
+  | 'state'
+  | 'national'
+  | 'world'
+  | 'weather'
+  | 'earthquakes'
+  | 'blogs'
+  | 'culture';
+
+export interface UserCategoryPreferences {
+  selectedCategories: PreferredCategoryKey[];
+  updatedAt: string;
+}
+
+export type ArticleIssueType =
+  | 'inaccuracy'
+  | 'broken_link'
+  | 'outdated_info'
+  | 'attribution_issue';
+
+export interface ArticleReportEntry {
+  id: string;
+  articleId: string;
+  articleTitle: string;
+  reason: string;
+  timestamp: string;
+  reviewStatus: 'pending_editorial_review';
+}
+
+export interface ArticleFeedbackEntry {
+  id: string;
+  articleId: string;
+  articleTitle: string;
+  issueType: ArticleIssueType;
+  comments: string;
+  timestamp: string;
+  reviewStatus: 'logged_for_review';
+}
+

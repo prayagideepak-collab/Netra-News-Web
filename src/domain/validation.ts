@@ -1,12 +1,17 @@
 import {
+  ArticleFeedbackEntry,
+  ArticleIssueType,
   ArticleRecord,
+  ArticleReportEntry,
   CircuitBreakerState,
   CityEntry,
   FeedEnvelope,
   LocationPreference,
   PowerStateInput,
   PowerTier,
+  PreferredCategoryKey,
   SourceLedgerEntry,
+  VerificationStatus,
 } from './types';
 
 const FUTURE_SKEW_TOLERANCE_MS = 5 * 60 * 1000; // 5 minutes max clock skew
@@ -346,7 +351,12 @@ export function validateFeedEnvelope(
       timezone: sanitizeString(rawItem?.timezone || 'Asia/Kolkata'),
       fetchedAt: sanitizeString(rawItem?.fetchedAt || nowIso),
       verifiedAt: rawItem?.verifiedAt ? sanitizeString(rawItem.verifiedAt) : null,
-      verificationStatus: pubCheck.valid ? verificationStatus : 'pending',
+      verificationStatus:
+        verificationStatus === 'retracted'
+          ? 'retracted'
+          : pubCheck.valid
+            ? verificationStatus
+            : 'pending',
       rightsStatus,
       permittedSummary: safeSummaryEn,
       permittedSummaryHi: safeSummaryHi,
@@ -605,3 +615,250 @@ export function formatSourceTimestamp(
     return isoString;
   }
 }
+
+export interface VerificationBadgeMeta {
+  status: VerificationStatus;
+  icon: string;
+  labelEn: 'Verified' | 'Pending Verification' | 'Retracted';
+  labelHi: string;
+  displayLabel: string;
+  descriptionEn: string;
+  descriptionHi: string;
+}
+
+/**
+ * Returns structured visual indicator metadata for a source/article verification status:
+ * - 'verified' -> 'Verified'
+ * - 'pending' -> 'Pending Verification'
+ * - 'retracted' -> 'Retracted'
+ */
+export function getVerificationBadgeMeta(
+  status: VerificationStatus,
+  lang: 'hi' | 'en' = 'hi'
+): VerificationBadgeMeta {
+  if (status === 'verified') {
+    return {
+      status: 'verified',
+      icon: '✓',
+      labelEn: 'Verified',
+      labelHi: 'सत्यापित (Verified)',
+      displayLabel: lang === 'hi' ? '✓ सत्यापित (Verified)' : '✓ Verified',
+      descriptionEn: 'Canonical source host, timestamp, and attribution verified against the allowlist.',
+      descriptionHi: 'अनुमति-सूची के विरुद्ध कैननिकल स्रोत होस्ट, समय और श्रेय सत्यापित।',
+    };
+  }
+  if (status === 'retracted') {
+    return {
+      status: 'retracted',
+      icon: '⚠',
+      labelEn: 'Retracted',
+      labelHi: 'वापस लिया गया (Retracted)',
+      displayLabel: lang === 'hi' ? '⚠ वापस लिया गया (Retracted)' : '⚠ Retracted',
+      descriptionEn: 'Withdrawn or retracted by the source publisher or editorial verification gate.',
+      descriptionHi: 'स्रोत प्रकाशक या संपादकीय जांच द्वारा वापस लिया गया (Retracted)।',
+    };
+  }
+  return {
+    status: 'pending',
+    icon: '⏳',
+    labelEn: 'Pending Verification',
+    labelHi: 'सत्यापन लंबित (Pending Verification)',
+    displayLabel: lang === 'hi' ? '⏳ सत्यापन लंबित (Pending Verification)' : '⏳ Pending Verification',
+    descriptionEn: 'Source timestamp or publisher permission is pending verification.',
+    descriptionHi: 'स्रोत समय या प्रकाशक अनुमति का सत्यापन लंबित है।',
+  };
+}
+
+/**
+ * Maps an ArticleRecord to all matching PreferredCategoryKey values based on its scope and category/publisher.
+ */
+export function getArticleCategoryKeys(item: ArticleRecord): PreferredCategoryKey[] {
+  const keys = new Set<PreferredCategoryKey>();
+  if (
+    item.scope === 'local' ||
+    item.scope === 'state' ||
+    item.scope === 'national' ||
+    item.scope === 'world'
+  ) {
+    keys.add(item.scope);
+  }
+
+  const catLower = `${item.category} ${item.publisherId}`.toLowerCase();
+  if (catLower.includes('weather') || catLower.includes('imd')) {
+    keys.add('weather');
+  }
+  if (catLower.includes('seismo') || catLower.includes('earthquake') || catLower.includes('ncs')) {
+    keys.add('earthquakes');
+  }
+  if (catLower.includes('blog')) {
+    keys.add('blogs');
+  }
+  if (catLower.includes('culture') || catLower.includes('astrology') || catLower.includes('panchang')) {
+    keys.add('culture');
+  }
+
+  return Array.from(keys);
+}
+
+export interface PrioritizedFeedFeedResult {
+  prioritizedItems: ArticleRecord[];
+  secondaryItems: ArticleRecord[];
+  matchedCategoriesForArticle: Record<string, PreferredCategoryKey[]>;
+}
+
+/**
+ * Prioritizes and orders articles according to the user's saved preferred categories
+ * and selected city/state preference while preserving non-selected items in secondaryItems.
+ */
+export function prioritizeArticlesByPreferences(
+  items: ArticleRecord[],
+  selectedCategories: PreferredCategoryKey[],
+  locationPref: LocationPreference
+): PrioritizedFeedFeedResult {
+  const selectedSet = new Set<PreferredCategoryKey>(selectedCategories);
+  const prioritizedItems: ArticleRecord[] = [];
+  const secondaryItems: ArticleRecord[] = [];
+  const matchedCategoriesForArticle: Record<string, PreferredCategoryKey[]> = {};
+
+  // Filter items that belong to another city/state when in local/state scope (unless test fixture)
+  const regionFiltered = items.filter((i) => {
+    if (i.isTestFixture) return true;
+    if (i.scope === 'local') {
+      return i.cityId === locationPref.cityId || i.stateCode === locationPref.stateCode;
+    }
+    if (i.scope === 'state') {
+      return i.stateCode === locationPref.stateCode || !i.stateCode;
+    }
+    return true;
+  });
+
+  for (const item of regionFiltered) {
+    const itemKeys = getArticleCategoryKeys(item);
+    const matched = itemKeys.filter((k) => selectedSet.has(k));
+    matchedCategoriesForArticle[item.id] = matched;
+    if (matched.length > 0) {
+      prioritizedItems.push(item);
+    } else {
+      secondaryItems.push(item);
+    }
+  }
+
+  // Sort prioritizedItems by the user's selectedCategories order, then by Local -> State -> National
+  const scopeRank: Record<string, number> = { local: 1, state: 2, national: 3, world: 4 };
+  prioritizedItems.sort((a, b) => {
+    const aMatches = matchedCategoriesForArticle[a.id] ?? [];
+    const bMatches = matchedCategoriesForArticle[b.id] ?? [];
+    const aFirstIdx = aMatches.length > 0 ? Math.min(...aMatches.map((k) => selectedCategories.indexOf(k))) : 99;
+    const bFirstIdx = bMatches.length > 0 ? Math.min(...bMatches.map((k) => selectedCategories.indexOf(k))) : 99;
+    if (aFirstIdx !== bFirstIdx) return aFirstIdx - bFirstIdx;
+    return (scopeRank[a.scope] ?? 9) - (scopeRank[b.scope] ?? 9);
+  });
+
+  return {
+    prioritizedItems,
+    secondaryItems,
+    matchedCategoriesForArticle,
+  };
+}
+
+/**
+ * Validates and constructs a login-free ArticleReportEntry for editorial review.
+ */
+export function validateAndCreateArticleReport(
+  articleId: string,
+  articleTitle: string,
+  rawReason: string,
+  nowIso: string = new Date().toISOString()
+): { valid: boolean; errorEn?: string; errorHi?: string; entry?: ArticleReportEntry } {
+  const cleanId = sanitizeString(articleId);
+  const cleanTitle = sanitizeString(articleTitle) || 'Article';
+  const cleanReason = sanitizeString(rawReason);
+
+  if (!cleanId) {
+    return {
+      valid: false,
+      errorEn: 'Missing article ID for report.',
+      errorHi: 'रिपोर्ट के लिए लेख आईडी अनुपलब्ध है।',
+    };
+  }
+
+  if (cleanReason.length < 5) {
+    return {
+      valid: false,
+      errorEn: 'Please provide a brief reason for reporting (at least 5 characters).',
+      errorHi: 'कृपया रिपोर्ट करने का संक्षिप्त कारण लिखें (कम से कम 5 अक्षर)।',
+    };
+  }
+
+  return {
+    valid: true,
+    entry: {
+      id: `rep-${Date.parse(nowIso) || Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+      articleId: cleanId,
+      articleTitle: cleanTitle,
+      reason: cleanReason,
+      timestamp: nowIso,
+      reviewStatus: 'pending_editorial_review',
+    },
+  };
+}
+
+const VALID_ISSUE_TYPES: ArticleIssueType[] = [
+  'inaccuracy',
+  'broken_link',
+  'outdated_info',
+  'attribution_issue',
+];
+
+/**
+ * Validates and constructs an ArticleFeedbackEntry capturing articleId, issueType, and user comments.
+ */
+export function validateAndCreateArticleFeedback(
+  articleId: string,
+  articleTitle: string,
+  rawIssueType: unknown,
+  rawComments: string,
+  nowIso: string = new Date().toISOString()
+): { valid: boolean; errorEn?: string; errorHi?: string; entry?: ArticleFeedbackEntry } {
+  const cleanId = sanitizeString(articleId);
+  const cleanTitle = sanitizeString(articleTitle) || 'Article';
+  const cleanComments = sanitizeString(rawComments);
+
+  if (!cleanId) {
+    return {
+      valid: false,
+      errorEn: 'Missing article ID for feedback.',
+      errorHi: 'प्रतिक्रिया के लिए लेख आईडी अनुपलब्ध है।',
+    };
+  }
+
+  if (typeof rawIssueType !== 'string' || !VALID_ISSUE_TYPES.includes(rawIssueType as ArticleIssueType)) {
+    return {
+      valid: false,
+      errorEn: 'Please select a valid issue type (Inaccuracy, Broken Link, Outdated Information, or Attribution Issue).',
+      errorHi: 'कृपया समस्या का सही प्रकार चुनें (तथ्यगत त्रुटि, टूटा हुआ लिंक, पुरानी जानकारी, या श्रेय समस्या)।',
+    };
+  }
+
+  if (cleanComments.length < 5) {
+    return {
+      valid: false,
+      errorEn: 'Please enter brief comments describing the issue (at least 5 characters).',
+      errorHi: 'कृपया समस्या का वर्णन करते हुए संक्षिप्त टिप्पणी लिखें (कम से कम 5 अक्षर)।',
+    };
+  }
+
+  return {
+    valid: true,
+    entry: {
+      id: `fb-${Date.parse(nowIso) || Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+      articleId: cleanId,
+      articleTitle: cleanTitle,
+      issueType: rawIssueType as ArticleIssueType,
+      comments: cleanComments,
+      timestamp: nowIso,
+      reviewStatus: 'logged_for_review',
+    },
+  };
+}
+

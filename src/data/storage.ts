@@ -1,10 +1,14 @@
 import {
+  ArticleFeedbackEntry,
+  ArticleReportEntry,
   CircuitBreakerState,
   FeedEnvelope,
   FeedSimulationMode,
   LanguageCode,
   LocationPreference,
   PowerStateInput,
+  PreferredCategoryKey,
+  UserCategoryPreferences,
 } from '../domain/types';
 import { PACKAGED_CITIES } from './citiesDataset';
 import { STAGE1_OFFICIAL_LINK_ENVELOPE } from './feedsData';
@@ -18,6 +22,9 @@ const STORAGE_KEYS = {
   CIRCUIT_BREAKER: 'netra_news_v1_circuit_breaker',
   DIAGNOSTIC_LOG: 'netra_news_v1_bounded_log',
   CORRECTION_DRAFTS: 'netra_news_v1_correction_drafts',
+  CATEGORY_PREFS: 'netra_news_v1_category_prefs',
+  ARTICLE_REPORTS: 'netra_news_v1_article_reports',
+  ARTICLE_FEEDBACK: 'netra_news_v1_article_feedback',
 };
 
 const MAX_LOG_ENTRIES = 50;
@@ -245,3 +252,91 @@ export function saveCorrectionDraft(draft: CorrectionDraft): CorrectionDraft[] {
   safeSetItem(STORAGE_KEYS.CORRECTION_DRAFTS, JSON.stringify(updated));
   return updated;
 }
+
+export const ALL_PREFERRED_CATEGORIES: PreferredCategoryKey[] = [
+  'local',
+  'state',
+  'national',
+  'world',
+  'weather',
+  'earthquakes',
+  'blogs',
+  'culture',
+];
+
+export const DEFAULT_CATEGORY_PREFERENCES: UserCategoryPreferences = {
+  selectedCategories: ['local', 'state', 'national', 'weather', 'earthquakes'],
+  updatedAt: '2026-11-06T00:00:00Z',
+};
+
+export function loadCategoryPreferences(): UserCategoryPreferences {
+  const raw = safeGetItem(STORAGE_KEYS.CATEGORY_PREFS);
+  if (!raw) return { ...DEFAULT_CATEGORY_PREFERENCES, selectedCategories: [...DEFAULT_CATEGORY_PREFERENCES.selectedCategories] };
+  try {
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed?.selectedCategories)) {
+      return { ...DEFAULT_CATEGORY_PREFERENCES, selectedCategories: [...DEFAULT_CATEGORY_PREFERENCES.selectedCategories] };
+    }
+    const valid = parsed.selectedCategories.filter((c: unknown): c is PreferredCategoryKey =>
+      typeof c === 'string' && ALL_PREFERRED_CATEGORIES.includes(c as PreferredCategoryKey)
+    );
+    if (valid.length === 0) {
+      return { ...DEFAULT_CATEGORY_PREFERENCES, selectedCategories: [...DEFAULT_CATEGORY_PREFERENCES.selectedCategories] };
+    }
+    return {
+      selectedCategories: Array.from(new Set(valid)),
+      updatedAt: typeof parsed.updatedAt === 'string' ? parsed.updatedAt : new Date().toISOString(),
+    };
+  } catch {
+    return { ...DEFAULT_CATEGORY_PREFERENCES, selectedCategories: [...DEFAULT_CATEGORY_PREFERENCES.selectedCategories] };
+  }
+}
+
+export function saveCategoryPreferences(prefs: UserCategoryPreferences): UserCategoryPreferences {
+  const valid = prefs.selectedCategories.filter((c): c is PreferredCategoryKey =>
+    ALL_PREFERRED_CATEGORIES.includes(c)
+  );
+  const clean: UserCategoryPreferences = {
+    selectedCategories: valid.length > 0 ? Array.from(new Set(valid)) : [...DEFAULT_CATEGORY_PREFERENCES.selectedCategories],
+    updatedAt: prefs.updatedAt || new Date().toISOString(),
+  };
+  safeSetItem(STORAGE_KEYS.CATEGORY_PREFS, JSON.stringify(clean));
+  return clean;
+}
+
+export function loadArticleReports(): ArticleReportEntry[] {
+  const raw = safeGetItem(STORAGE_KEYS.ARTICLE_REPORTS);
+  if (!raw) return [];
+  try {
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? parsed.slice(0, 50) : [];
+  } catch {
+    return [];
+  }
+}
+
+export function saveArticleReport(report: ArticleReportEntry): ArticleReportEntry[] {
+  const existing = loadArticleReports();
+  const updated = [report, ...existing].slice(0, 50);
+  safeSetItem(STORAGE_KEYS.ARTICLE_REPORTS, JSON.stringify(updated));
+  return updated;
+}
+
+export function loadArticleFeedback(): ArticleFeedbackEntry[] {
+  const raw = safeGetItem(STORAGE_KEYS.ARTICLE_FEEDBACK);
+  if (!raw) return [];
+  try {
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? parsed.slice(0, 50) : [];
+  } catch {
+    return [];
+  }
+}
+
+export function saveArticleFeedback(feedback: ArticleFeedbackEntry): ArticleFeedbackEntry[] {
+  const existing = loadArticleFeedback();
+  const updated = [feedback, ...existing].slice(0, 50);
+  safeSetItem(STORAGE_KEYS.ARTICLE_FEEDBACK, JSON.stringify(updated));
+  return updated;
+}
+

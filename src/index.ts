@@ -11,25 +11,33 @@ import {
 } from './data/feedsData';
 import { SOURCE_ALLOWLIST_LEDGER } from './data/sourcesLedger';
 import {
+  ALL_PREFERRED_CATEGORIES,
   appendBoundedLog,
+  DEFAULT_CATEGORY_PREFERENCES,
   DEFAULT_CIRCUIT_BREAKER,
+  loadArticleFeedback,
+  loadArticleReports,
   loadBoundedLogs,
   loadCachedEnvelope,
+  loadCategoryPreferences,
   loadCircuitBreaker,
   loadCorrectionDrafts,
   loadFeedMode,
   loadLanguage,
   loadLocationPreference,
   loadPowerInput,
+  saveArticleFeedback,
+  saveArticleReport,
   saveCachedEnvelope,
+  saveCategoryPreferences,
   saveCircuitBreaker,
-  saveCorrectionDraft,
   saveFeedMode,
   saveLanguage,
   saveLocationPreference,
   savePowerInput,
 } from './data/storage';
 import {
+  ArticleIssueType,
   ArticleRecord,
   CircuitBreakerState,
   FeedEnvelope,
@@ -40,13 +48,20 @@ import {
   NewsScope,
   PowerStateInput,
   PowerTier,
+  PreferredCategoryKey,
+  UserCategoryPreferences,
 } from './domain/types';
 import {
   evaluatePowerTier,
   formatSourceTimestamp,
+  getArticleCategoryKeys,
+  getVerificationBadgeMeta,
+  prioritizeArticlesByPreferences,
   recordFailureAndAdvanceCircuit,
   resolveCityFromTransientCoords,
   sanitizeString,
+  validateAndCreateArticleFeedback,
+  validateAndCreateArticleReport,
   validateFeedEnvelope,
 } from './domain/validation';
 import {
@@ -59,24 +74,37 @@ import {
 } from './pages/GovernancePages';
 import { EmbeddedNewsroomViewport, launchFullWebXRSession } from './xr/SpatialNewsroom';
 
+interface CategoryPrefsModalState {
+  isOpen: boolean;
+  draftCategories: PreferredCategoryKey[];
+  savedNotice: string | null;
+}
+
 interface AppState {
   route: string;
   lang: LanguageCode;
   locationPref: LocationPreference;
+  categoryPrefs: UserCategoryPreferences;
+  categoryModal: CategoryPrefsModalState;
   feedMode: FeedSimulationMode;
   powerInput: PowerStateInput;
   powerTier: PowerTier;
   circuitBreaker: CircuitBreakerState;
   hazardPreviewState: 'unavailable' | 'stale' | 'all_clear_test';
   cityModal: CityModalState;
-  reportFormNotice: string | null;
-  reportFormError: string | null;
+  reportPromptOpen: boolean;
+  reportArticleNotice: string | null;
+  reportArticleError: string | null;
+  feedbackSelectedType: ArticleIssueType;
+  feedbackNotice: string | null;
+  feedbackError: string | null;
   spatialKioskExpanded: boolean;
 }
 
 const embeddedViewport = new EmbeddedNewsroomViewport();
 
 const initialLoc = loadLocationPreference();
+const initialCatPrefs = loadCategoryPreferences();
 const initialPowerInput = loadPowerInput();
 const initialPowerTier = evaluatePowerTier('Normal', initialPowerInput);
 
@@ -84,6 +112,12 @@ const state: AppState = {
   route: normalizePath(window.location.pathname),
   lang: loadLanguage(),
   locationPref: initialLoc,
+  categoryPrefs: initialCatPrefs,
+  categoryModal: {
+    isOpen: false,
+    draftCategories: [...initialCatPrefs.selectedCategories],
+    savedNotice: null,
+  },
   feedMode: loadFeedMode(),
   powerInput: initialPowerInput,
   powerTier: initialPowerTier,
@@ -98,8 +132,12 @@ const state: AppState = {
     geoStatusType: null,
     ambiguousCandidates: [],
   },
-  reportFormNotice: null,
-  reportFormError: null,
+  reportPromptOpen: false,
+  reportArticleNotice: null,
+  reportArticleError: null,
+  feedbackSelectedType: 'inaccuracy',
+  feedbackNotice: null,
+  feedbackError: null,
   spatialKioskExpanded: false,
 };
 
@@ -148,12 +186,143 @@ function getActiveEnvelopeAndValidation(): {
   return { envelope: rawEnvelope, loadState, validation };
 }
 
+const CATEGORY_META: Record<
+  PreferredCategoryKey,
+  { labelEn: string; labelHi: string; stageNoteEn: string; stageNoteHi: string }
+> = {
+  local: {
+    labelEn: 'Local',
+    labelHi: 'स्थानीय (Local)',
+    stageNoteEn: 'Stage 1 Active',
+    stageNoteHi: 'चरण 1 सक्रिय',
+  },
+  state: {
+    labelEn: 'State',
+    labelHi: 'राज्य (State)',
+    stageNoteEn: 'Stage 1 Active',
+    stageNoteHi: 'चरण 1 सक्रिय',
+  },
+  national: {
+    labelEn: 'National',
+    labelHi: 'राष्ट्रीय (National)',
+    stageNoteEn: 'Stage 1 Active',
+    stageNoteHi: 'चरण 1 सक्रिय',
+  },
+  weather: {
+    labelEn: 'Weather',
+    labelHi: 'मौसम (Weather)',
+    stageNoteEn: 'Stage 1 Active',
+    stageNoteHi: 'चरण 1 सक्रिय',
+  },
+  earthquakes: {
+    labelEn: 'Earthquakes',
+    labelHi: 'भूकंप (Earthquakes)',
+    stageNoteEn: 'Stage 1 Active',
+    stageNoteHi: 'चरण 1 सक्रिय',
+  },
+  world: {
+    labelEn: 'World',
+    labelHi: 'विश्व (World)',
+    stageNoteEn: 'Planned Stage 5 (Preference Saved)',
+    stageNoteHi: 'चरण 5 नियोजित (प्राथमिकता सहेजी गई)',
+  },
+  blogs: {
+    labelEn: 'Blogs',
+    labelHi: 'ब्लॉग (Blogs)',
+    stageNoteEn: 'Planned Stage 5 (Preference Saved)',
+    stageNoteHi: 'चरण 5 नियोजित (प्राथमिकता सहेजी गई)',
+  },
+  culture: {
+    labelEn: 'Culture/Astrology',
+    labelHi: 'संस्कृति/ज्योतिष (Culture/Astrology)',
+    stageNoteEn: 'Planned Stage 5 (Preference Saved)',
+    stageNoteHi: 'चरण 5 नियोजित (प्राथमिकता सहेजी गई)',
+  },
+};
+
+function renderCategoryPrefsModal(): string {
+  if (!state.categoryModal.isOpen) return '';
+  const isHi = state.lang === 'hi';
+  const selectedSet = new Set(state.categoryModal.draftCategories);
+
+  return `
+    <div class="modal-backdrop" role="dialog" aria-modal="true" aria-labelledby="category-prefs-modal-title">
+      <div class="modal-card" data-testid="category-prefs-modal">
+        <div style="display:flex; align-items:center; justify-content:space-between; gap:12px;">
+          <h2 id="category-prefs-modal-title" style="margin:0; font-family:var(--font-serif); font-size:1.35rem;">
+            ${
+              isHi
+                ? 'पसंदीदा समाचार श्रेणियां चुनें (Preferred News Categories)'
+                : 'Select Preferred News Categories'
+            }
+          </h2>
+          <button type="button" id="close-category-modal-btn" class="btn-quiet" aria-label="Close">✕</button>
+        </div>
+
+        <p style="margin:8px 0 14px; font-size:0.88rem; color:var(--text-secondary);">
+          ${
+            isHi
+              ? 'अपनी पसंदीदा श्रेणियां चुनें और सहेजें। मुख्य पृष्ठ (Home) आपकी चयनित श्रेणियों के लेखों को सर्वोच्च प्राथमिकता देगा। ये प्राथमिकताएं आपके डिवाइस पर स्थानीय रूप से (localStorage में) सहेजी जाती हैं।'
+              : 'Select and save your preferred news categories. The Home screen prioritizes and displays articles from your selected categories first. Stored locally on your device.'
+          }
+        </p>
+
+        <form id="category-prefs-form">
+          <div class="category-pref-grid">
+            ${ALL_PREFERRED_CATEGORIES.map((key) => {
+              const meta = CATEGORY_META[key];
+              const checked = selectedSet.has(key);
+              return `
+                <label class="category-pref-option" for="cat-pref-check-${key}">
+                  <input
+                    type="checkbox"
+                    id="cat-pref-check-${key}"
+                    name="preferredCategory"
+                    value="${key}"
+                    ${checked ? 'checked' : ''}
+                  />
+                  <div>
+                    <div style="font-weight:700; color:var(--text-primary);">
+                      ${isHi ? meta.labelHi : meta.labelEn}
+                    </div>
+                    <div style="font-size:0.76rem; color:var(--text-muted);">
+                      ${isHi ? meta.stageNoteHi : meta.stageNoteEn}
+                    </div>
+                  </div>
+                </label>
+              `;
+            }).join('')}
+          </div>
+
+          <div style="display:flex; flex-wrap:wrap; align-items:center; justify-content:space-between; gap:10px; margin-top:18px;">
+            <button type="button" id="reset-category-prefs-btn" class="btn-quiet">
+              ${isHi ? 'डिफ़ॉल्ट श्रेणियां रीसेट करें' : 'Reset Default Categories'}
+            </button>
+            <div style="display:flex; gap:10px;">
+              <button type="button" id="cancel-category-modal-btn" class="btn-quiet">
+                ${isHi ? 'रद्द करें (Cancel)' : 'Cancel'}
+              </button>
+              <button type="submit" id="save-category-prefs-btn" class="btn-amber">
+                ${isHi ? 'प्राथमिकताएं सहेजें (Save Preferences)' : 'Save Category Preferences'}
+              </button>
+            </div>
+          </div>
+        </form>
+      </div>
+    </div>
+  `;
+}
+
 function renderArticleCard(item: ArticleRecord, lang: LanguageCode, isStale: boolean): string {
   const isHi = lang === 'hi';
   const title = isHi ? item.titleHi : item.title;
   const publisher = isHi ? item.publisherHi : item.publisher;
   const category = isHi ? item.categoryHi : item.category;
   const summary = isHi ? item.permittedSummaryHi : item.permittedSummary;
+  const badge = getVerificationBadgeMeta(item.verificationStatus, lang);
+  const matchedPrefs = getArticleCategoryKeys(item).filter((k) =>
+    state.categoryPrefs.selectedCategories.includes(k)
+  );
 
   const scopeLabel =
     item.scope === 'local'
@@ -169,26 +338,41 @@ function renderArticleCard(item: ArticleRecord, lang: LanguageCode, isStale: boo
           : 'National Fallback';
 
   return `
-    <article class="article-card" data-test-fixture="${Boolean(item.isTestFixture)}">
+    <article class="article-card" data-test-fixture="${Boolean(item.isTestFixture)}" data-article-id="${item.id}">
       <div>
-        <div class="article-kicker-meta">
+        <div class="article-kicker-meta" style="display:flex; flex-wrap:wrap; align-items:center; gap:6px;">
           <strong>${scopeLabel}</strong>
-          <span aria-hidden="true"> · </span>
+          <span aria-hidden="true">·</span>
           <span>${category}</span>
-          <span aria-hidden="true"> · </span>
+          <span aria-hidden="true">·</span>
           <span>${isHi ? 'स्रोत:' : 'Source:'} <strong>${publisher}</strong></span>
-          <span aria-hidden="true"> · </span>
+          <span
+            class="verification-badge"
+            data-verification="${badge.status}"
+            data-testid="source-verification-badge"
+            title="${isHi ? badge.descriptionHi : badge.descriptionEn}"
+          >
+            ${badge.displayLabel}
+          </span>
+          <span aria-hidden="true">·</span>
           <span>Rights: ${item.rightsStatus}</span>
           ${
+            matchedPrefs.length > 0
+              ? `<span aria-hidden="true">·</span><span style="color:var(--amber-300); font-weight:600;">★ ${
+                  isHi ? 'पसंदीदा श्रेणी' : 'Preferred'
+                } (${matchedPrefs.map((k) => CATEGORY_META[k].labelEn).join(', ')})</span>`
+              : ''
+          }
+          ${
             isStale
-              ? `<span aria-hidden="true"> · </span><strong style="color:var(--amber-400);">${
+              ? `<span aria-hidden="true">·</span><strong style="color:var(--amber-400);">${
                   isHi ? 'बासी / ऑफ़लाइन कैश (STALE)' : 'STALE / OFFLINE CACHE'
                 }</strong>`
               : ''
           }
           ${
             item.isTestFixture
-              ? `<span aria-hidden="true"> · </span><strong style="color:var(--status-danger);">[TEST FIXTURE — NOT REAL NEWS]</strong>`
+              ? `<span aria-hidden="true">·</span><strong style="color:var(--status-danger);">[TEST FIXTURE — NOT REAL NEWS]</strong>`
               : ''
           }
         </div>
@@ -235,8 +419,8 @@ function renderArticleCard(item: ArticleRecord, lang: LanguageCode, isStale: boo
             ${formatSourceTimestamp(item.fetchedAt, lang)}
           </div>
           <div>
-            ${isHi ? 'सत्यापन स्थिति (Status):' : 'Verification:'}
-            ${item.verificationStatus.toUpperCase()}
+            ${isHi ? 'स्रोत सत्यापन स्थिति (Verification Status):' : 'Source Verification Status:'}
+            <strong>${badge.labelEn}</strong> (${badge.displayLabel})
           </div>
         </div>
 
@@ -255,7 +439,7 @@ function renderArticleCard(item: ArticleRecord, lang: LanguageCode, isStale: boo
             class="nav-link-btn"
             style="border:1px solid var(--border-subtle);"
           >
-            ${isHi ? 'विवरण एवं श्रेय देखें' : 'Attribution & Details'}
+            ${isHi ? 'विवरण, रिपोर्ट एवं प्रतिक्रिया' : 'Details, Report & Feedback'}
           </a>
         </div>
       </div>
@@ -438,21 +622,146 @@ function renderHomeOrScopePage(
     `;
   }
 
-  // Full Home Newspaper Hierarchy: 1) Local -> 2) State -> 3) National Fallback
+  const prioritizedResult = prioritizeArticlesByPreferences(
+    items,
+    state.categoryPrefs.selectedCategories,
+    state.locationPref
+  );
+
+  const categoryPrefsBannerHtml = `
+    <section class="category-prefs-bar" data-testid="home-category-preferences-bar" aria-label="${
+      isHi ? 'आपकी समाचार श्रेणी प्राथमिकताएं' : 'Your News Category Preferences'
+    }">
+      <div style="display:flex; flex-wrap:wrap; align-items:center; justify-content:space-between; gap:10px;">
+        <div>
+          <strong style="color:var(--amber-400); font-size:0.95rem;">
+            ${
+              isHi
+                ? '★ आपकी चयनित समाचार श्रेणियां (Saved Preferred Categories — On-Device):'
+                : '★ Your Preferred News Categories (Saved On-Device):'
+            }
+          </strong>
+          <div style="font-size:0.82rem; color:var(--text-secondary);">
+            ${
+              isHi
+                ? 'मुख्य पृष्ठ आपकी चयनित श्रेणियों के लेखों को प्राथमिकता देता है। किसी भी श्रेणी पर क्लिक करके तुरंत टॉगल करें या प्राथमिकताएं अनुकूलित करें।'
+                : 'The Home screen prioritizes articles from your selected categories. Click any chip below to toggle or open Category Preferences.'
+            }
+          </div>
+        </div>
+        <div style="display:flex; flex-wrap:wrap; gap:8px;">
+          <button type="button" id="home-customize-categories-btn" class="btn-amber">
+            ⚙️ ${isHi ? 'श्रेणियां चुनें / सहेजें (Customize Categories)' : 'Select & Save Categories'}
+          </button>
+          <button type="button" id="home-change-city-btn">
+            📍 ${isHi ? 'शहर बदलें (Change City)' : 'Change City'}
+          </button>
+        </div>
+      </div>
+
+      <div class="category-chip-row" role="group" aria-label="${
+        isHi ? 'श्रेणी फ़िल्टर चिप्स' : 'Category preference chips'
+      }">
+        ${ALL_PREFERRED_CATEGORIES.map((key) => {
+          const meta = CATEGORY_META[key];
+          const isSelected = state.categoryPrefs.selectedCategories.includes(key);
+          return `
+            <button
+              type="button"
+              class="category-chip quick-toggle-category-btn ${isSelected ? 'active' : ''}"
+              data-category-key="${key}"
+              aria-pressed="${isSelected}"
+              title="${isHi ? meta.stageNoteHi : meta.stageNoteEn}"
+            >
+              <span>${isSelected ? '✓' : '+'}</span>
+              <span>${isHi ? meta.labelHi : meta.labelEn}</span>
+            </button>
+          `;
+        }).join('')}
+      </div>
+
+      ${
+        state.categoryModal.savedNotice
+          ? `<div style="font-size:0.82rem; color:var(--status-ok); font-weight:600;" data-testid="category-saved-notice">
+              ${state.categoryModal.savedNotice}
+            </div>`
+          : ''
+      }
+
+      <div style="border-top:1px solid var(--border-subtle); padding-top:10px; display:flex; flex-wrap:wrap; align-items:center; gap:10px; font-size:0.8rem; color:var(--text-secondary);">
+        <strong>${isHi ? 'स्रोत सत्यापन स्थिति संकेत (Source Verification Legend):' : 'Source Verification Status Key:'}</strong>
+        <span class="verification-badge" data-verification="verified">
+          ${isHi ? '✓ सत्यापित (Verified)' : '✓ Verified'}
+        </span>
+        <span class="verification-badge" data-verification="pending">
+          ${isHi ? '⏳ सत्यापन लंबित (Pending Verification)' : '⏳ Pending Verification'}
+        </span>
+        <span class="verification-badge" data-verification="retracted">
+          ${isHi ? '⚠ वापस लिया गया (Retracted)' : '⚠ Retracted'}
+        </span>
+      </div>
+    </section>
+  `;
+
+  // Full Home Newspaper Hierarchy: Prioritized by Selected Categories + Local -> State -> National
   return `
     ${statusBannerHtml}
     ${breakingStripHtml}
+    ${categoryPrefsBannerHtml}
 
-    <section class="newspaper-section" style="margin-top:20px; border-top:none; padding-top:0;">
+    <section class="newspaper-section" style="margin-top:20px; border-top:none; padding-top:0;" data-testid="prioritized-articles-section">
       <div class="section-header-row">
         <div>
           <h1 class="section-title">
             ${
               isHi
+                ? `★ आपकी पसंदीदा श्रेणियों से प्राथमिकता प्राप्त समाचार (${prioritizedResult.prioritizedItems.length})`
+                : `★ Prioritized for Your Selected Categories (${prioritizedResult.prioritizedItems.length})`
+            }
+          </h1>
+          <p class="section-subtitle">
+            ${
+              isHi
+                ? `सक्रिय श्रेणियां: ${state.categoryPrefs.selectedCategories
+                    .map((k) => CATEGORY_META[k].labelHi)
+                    .join(', ')} · शहर: ${state.locationPref.cityLabelHi}`
+                : `Active Categories: ${state.categoryPrefs.selectedCategories
+                    .map((k) => CATEGORY_META[k].labelEn)
+                    .join(', ')} · City: ${state.locationPref.cityLabel}`
+            }
+          </p>
+        </div>
+      </div>
+
+      ${
+        prioritizedResult.prioritizedItems.length === 0
+          ? `<div class="state-banner">
+              <p style="margin:0; font-size:0.92rem;">
+                ${
+                  isHi
+                    ? 'आपकी वर्तमान में चयनित श्रेणियों से मेल खाने वाला कोई चरण-1 कार्ड नहीं है। कृपया ऊपर चिप्स पर क्लिक करके Local, State, National, Weather या Earthquakes सक्षम करें।'
+                    : 'No Stage 1 articles match your currently selected categories. Enable Local, State, National, Weather, or Earthquakes above to display matching items.'
+                }
+              </p>
+            </div>`
+          : `<div class="newspaper-grid" data-testid="prioritized-articles-grid">
+              ${prioritizedResult.prioritizedItems
+                .map((item) => renderArticleCard(item, state.lang, isStale))
+                .join('')}
+            </div>`
+      }
+    </section>
+
+    <section class="newspaper-section">
+      <div class="section-header-row">
+        <div>
+          <h2 class="section-title">
+            ${
+              isHi
                 ? `1. स्थानीय समाचार एवं नागरिक संदर्भ — ${state.locationPref.cityLabelHi}`
                 : `1. Local Civic Reference — ${state.locationPref.cityLabel}`
             }
-          </h1>
+          </h2>
           <p class="section-subtitle">
             ${
               isHi
@@ -461,9 +770,6 @@ function renderHomeOrScopePage(
             }
           </p>
         </div>
-        <button type="button" id="home-change-city-btn">
-          ${isHi ? 'शहर बदलें (Change City)' : 'Change City'}
-        </button>
       </div>
 
       ${
@@ -547,31 +853,53 @@ function renderArticleDetailPage(articleId: string, allItems: ArticleRecord[]): 
   const title = isHi ? item.titleHi : item.title;
   const publisher = isHi ? item.publisherHi : item.publisher;
   const summary = isHi ? item.permittedSummaryHi : item.permittedSummary;
+  const badge = getVerificationBadgeMeta(item.verificationStatus, state.lang);
+  const articleReports = loadArticleReports().filter((r) => r.articleId === item.id);
+  const articleFeedbackList = loadArticleFeedback().filter((f) => f.articleId === item.id);
 
   return `
     <article class="newspaper-section" style="margin-top:16px; border-top:none; padding-top:0;">
-      <div style="margin-bottom:16px;">
+      <div style="margin-bottom:16px; display:flex; flex-wrap:wrap; align-items:center; justify-content:space-between; gap:10px;">
         <a href="/" data-nav="/" class="nav-link-btn" style="border:1px solid var(--border-subtle);">
           ← ${isHi ? 'मुख्य पृष्ठ पर लौटें (Back to Newspaper)' : 'Back to Newspaper Front Page'}
         </a>
+
+        <button
+          type="button"
+          id="open-report-article-btn"
+          class="btn-amber"
+          data-testid="report-article-button"
+        >
+          🚩 ${isHi ? 'लेख की रिपोर्ट करें (Report Article)' : 'Report Article'}
+        </button>
       </div>
 
       <div class="article-card" data-test-fixture="${Boolean(item.isTestFixture)}">
-        <div class="article-kicker-meta">
+        <div class="article-kicker-meta" style="display:flex; flex-wrap:wrap; align-items:center; gap:6px;">
           <strong>${item.scope.toUpperCase()}</strong>
-          <span aria-hidden="true"> · </span>
+          <span aria-hidden="true">·</span>
           <span>${isHi ? item.categoryHi : item.category}</span>
-          <span aria-hidden="true"> · </span>
+          <span aria-hidden="true">·</span>
           <span>Publisher: <strong>${publisher}</strong></span>
-          <span aria-hidden="true"> · </span>
+          <span
+            class="verification-badge"
+            data-verification="${badge.status}"
+            data-testid="detail-source-verification-badge"
+            title="${isHi ? badge.descriptionHi : badge.descriptionEn}"
+          >
+            ${badge.displayLabel}
+          </span>
+          <span aria-hidden="true">·</span>
           <span>Rights Status: <strong>${item.rightsStatus}</strong></span>
-          <span aria-hidden="true"> · </span>
-          <span>Verification: <strong>${item.verificationStatus}</strong></span>
         </div>
 
         <h1 class="section-title" style="margin-top:8px;">${title}</h1>
 
         <div class="article-timestamps" style="margin-top:12px;">
+          <div>
+            <strong>${isHi ? 'स्रोत सत्यापन स्थिति (Verification Status):' : 'Source Verification Status:'}</strong>
+            <span>${badge.labelEn} — ${isHi ? badge.descriptionHi : badge.descriptionEn}</span>
+          </div>
           <div>
             <strong>${isHi ? 'स्रोत प्रकाशन समय (Source Published At):' : 'Source Publication Time:'}</strong>
             ${formatSourceTimestamp(item.publishedAt, state.lang)} (${item.timezone})
@@ -656,56 +984,242 @@ function renderArticleDetailPage(articleId: string, allItems: ArticleRecord[]): 
           }
         </div>
 
-        <div class="state-banner" style="margin-top:14px;">
-          <h2 style="margin:0 0 6px; font-size:1.05rem; font-family:var(--font-serif);">
+        <!-- 1. REPORT ARTICLE FEATURE (No login required; reviewed by editorial team) -->
+        <div
+          id="report-article-section"
+          class="state-banner"
+          style="margin-top:14px; border-color:${
+            state.reportPromptOpen ? 'var(--amber-400)' : 'var(--border-subtle)'
+          };"
+          data-testid="report-article-section"
+        >
+          <div style="display:flex; flex-wrap:wrap; align-items:center; justify-content:space-between; gap:8px;">
+            <h2 style="margin:0; font-size:1.08rem; font-family:var(--font-serif); color:var(--amber-400);">
+              🚩 ${
+                isHi
+                  ? 'लेख की रिपोर्ट करें (Report Article — Editorial Review)'
+                  : 'Report Article (Editorial Team Review)'
+              }
+            </h2>
+            <span style="font-family:var(--font-mono); font-size:0.76rem; color:var(--text-muted);">
+              Article ID: ${item.id}
+            </span>
+          </div>
+
+          <p style="margin:6px 0 12px; font-size:0.85rem; color:var(--text-secondary);">
             ${
               isHi
-                ? 'समस्या रिपोर्ट करें / सुधार का अनुरोध करें (Report a Problem / Request Correction)'
-                : 'Report a Problem / Request a Correction'
+                ? 'इस सुविधा के लिए उपयोगकर्ता लॉगिन की आवश्यकता नहीं है। सबमिट की गई सभी रिपोर्टें लेख आईडी (Article ID), समय (Timestamp) और कारण के साथ लॉग की जाती हैं और नेत्र न्यूज़ संपादकीय टीम (Editorial Team) द्वारा उनकी समीक्षा की जाती है।'
+                : 'No user login is required. All reports are logged with the Article ID, timestamp, and your reason, and are reviewed by the NETRA NEWS editorial team.'
             }
-          </h2>
-          <form id="article-report-form" data-article-id="${item.id}" data-article-title="${title}">
-            <div class="form-field-group" style="margin-top:10px;">
-              <label for="report-reason-input">
+          </p>
+
+          <form id="report-article-form" data-article-id="${item.id}" data-article-title="${title}">
+            <div class="form-field-group" style="margin-top:8px;">
+              <label for="report-article-reason-input">
                 ${
                   isHi
-                    ? 'समस्या या त्रुटि का विवरण लिखें (आवश्यक):'
-                    : 'Describe the factual error, broken link, or attribution issue (Required):'
+                    ? 'रिपोर्ट करने का संक्षिप्त कारण लिखें (Brief reason for reporting):'
+                    : 'Brief reason for reporting this article:'
                 }
               </label>
               <textarea
-                id="report-reason-input"
-                name="reason"
-                rows="3"
+                id="report-article-reason-input"
+                name="reportReason"
+                rows="2"
                 placeholder="${
                   isHi
-                    ? 'उदाहरण: स्रोत लिंक टूटा हुआ है या समय क्षेत्र गलत है...'
-                    : 'e.g., Canonical source link returned 404 or publication time needs verification...'
+                    ? 'उदाहरण: स्रोत शीर्षक या श्रेय की संपादकीय जांच आवश्यक है...'
+                    : 'e.g., Please review source attribution or verify latest bulletin update...'
                 }"
               ></textarea>
             </div>
             ${
-              state.reportFormError
-                ? `<div style="color:var(--status-danger); font-size:0.85rem; margin-bottom:10px; font-weight:600;">
-                    ${state.reportFormError}
+              state.reportArticleError
+                ? `<div style="color:var(--status-danger); font-size:0.85rem; margin-bottom:10px; font-weight:600;" data-testid="report-article-error">
+                    ${state.reportArticleError}
                   </div>`
                 : ''
             }
             ${
-              state.reportFormNotice
-                ? `<div style="color:var(--status-ok); font-size:0.85rem; margin-bottom:10px; font-weight:600;">
-                    ${state.reportFormNotice}
+              state.reportArticleNotice
+                ? `<div style="color:var(--status-ok); font-size:0.85rem; margin-bottom:10px; font-weight:600;" data-testid="report-article-notice">
+                    ${state.reportArticleNotice}
                   </div>`
                 : ''
             }
-            <button type="submit" class="btn-amber" id="submit-problem-report-btn">
+            <button type="submit" class="btn-amber" id="submit-report-article-btn">
               ${
                 isHi
-                  ? 'सुधार रिपोर्ट सहेजें (Save Correction Report Packet)'
-                  : 'Record Problem Report Packet'
+                  ? 'संपादकीय समीक्षा के लिए रिपोर्ट सबमिट करें (Submit Article Report)'
+                  : 'Submit Report for Editorial Review'
               }
             </button>
           </form>
+
+          <div style="margin-top:14px; border-top:1px solid var(--border-subtle); padding-top:10px;" data-testid="article-reports-list">
+            <strong style="font-size:0.84rem; color:var(--text-secondary);">
+              ${
+                isHi
+                  ? `इस लेख के लिए दर्ज की गई रिपोर्टें (${articleReports.length}):`
+                  : `Logged Reports for This Article (${articleReports.length}):`
+              }
+            </strong>
+            ${
+              articleReports.length === 0
+                ? `<div style="font-size:0.8rem; color:var(--text-muted); margin-top:4px;">
+                    ${
+                      isHi
+                        ? 'इस लेख के लिए अभी तक कोई रिपोर्ट दर्ज नहीं की गई है।'
+                        : 'No reports logged for this article yet.'
+                    }
+                  </div>`
+                : articleReports
+                    .map(
+                      (r) => `
+                      <div style="margin-top:8px; padding:8px 10px; border-radius:6px; background:var(--navy-950); border:1px solid var(--border-subtle); font-size:0.82rem;">
+                        <div>
+                          <strong>Article ID:</strong> <code>${r.articleId}</code> ·
+                          <strong>Timestamp:</strong> <code>${r.timestamp}</code> ·
+                          <span style="color:var(--amber-400);">Reviewed by Editorial Team Queue</span>
+                        </div>
+                        <div style="margin-top:4px; color:var(--text-primary);">
+                          <strong>Reason:</strong> ${r.reason}
+                        </div>
+                      </div>
+                    `
+                    )
+                    .join('')
+            }
+          </div>
+        </div>
+
+        <!-- 2. STRUCTURED ARTICLE ISSUE FEEDBACK SYSTEM (Inaccuracies, Broken Links, Outdated Info) -->
+        <div class="state-banner" style="margin-top:14px;" data-testid="article-feedback-section">
+          <h2 style="margin:0 0 6px; font-size:1.08rem; font-family:var(--font-serif);">
+            ${
+              isHi
+                ? 'लेख प्रतिक्रिया एवं त्रुटि रिपोर्ट प्रणाली (Article Issue Feedback System)'
+                : 'Article Issue Feedback System (Report Inaccuracies, Broken Links or Outdated Info)'
+            }
+          </h2>
+          <p style="margin:0 0 12px; font-size:0.85rem; color:var(--text-secondary);">
+            ${
+              isHi
+                ? 'तथ्यगत त्रुटि, टूटे हुए लिंक या पुरानी जानकारी की रिपोर्ट करें। यह प्रणाली लेख आईडी, समस्या का प्रकार और आपकी टिप्पणी को समीक्षा के लिए दर्ज करती है।'
+                : 'Report inaccuracies, broken links, or outdated information directly. Captures Article ID, Issue Type, and your comments for editorial review.'
+            }
+          </p>
+
+          <form id="article-feedback-form" data-article-id="${item.id}" data-article-title="${title}">
+            <div class="form-field-group">
+              <label for="feedback-issue-type-select">
+                ${isHi ? 'समस्या का प्रकार चुनें (Select Issue Type):' : 'Issue Type:'}
+              </label>
+              <select id="feedback-issue-type-select" name="issueType">
+                <option value="inaccuracy" ${state.feedbackSelectedType === 'inaccuracy' ? 'selected' : ''}>
+                  ${isHi ? '1. तथ्यगत त्रुटि (Factual Inaccuracy)' : '1. Factual Inaccuracy'}
+                </option>
+                <option value="broken_link" ${state.feedbackSelectedType === 'broken_link' ? 'selected' : ''}>
+                  ${isHi ? '2. टूटा हुआ स्रोत लिंक (Broken Source Link)' : '2. Broken Source Link'}
+                </option>
+                <option value="outdated_info" ${state.feedbackSelectedType === 'outdated_info' ? 'selected' : ''}>
+                  ${isHi ? '3. पुरानी जानकारी (Outdated Information)' : '3. Outdated Information'}
+                </option>
+                <option value="attribution_issue" ${state.feedbackSelectedType === 'attribution_issue' ? 'selected' : ''}>
+                  ${isHi ? '4. स्रोत श्रेय समस्या (Source Attribution Issue)' : '4. Source Attribution Issue'}
+                </option>
+              </select>
+            </div>
+
+            <div class="form-field-group">
+              <label for="feedback-comments-input">
+                ${
+                  isHi
+                    ? 'आपकी टिप्पणी / विवरण (User Comments):'
+                    : 'Your Comments / Details:'
+                }
+              </label>
+              <textarea
+                id="feedback-comments-input"
+                name="comments"
+                rows="3"
+                placeholder="${
+                  isHi
+                    ? 'उदाहरण: कैननिकल लिंक 404 दे रहा है या प्रकाशन समय अपडेट करने की आवश्यकता है...'
+                    : 'e.g., The canonical link redirects to an archive page or timestamp is outdated...'
+                }"
+              ></textarea>
+            </div>
+
+            ${
+              state.feedbackError
+                ? `<div style="color:var(--status-danger); font-size:0.85rem; margin-bottom:10px; font-weight:600;" data-testid="article-feedback-error">
+                    ${state.feedbackError}
+                  </div>`
+                : ''
+            }
+            ${
+              state.feedbackNotice
+                ? `<div style="color:var(--status-ok); font-size:0.85rem; margin-bottom:10px; font-weight:600;" data-testid="article-feedback-notice">
+                    ${state.feedbackNotice}
+                  </div>`
+                : ''
+            }
+
+            <div style="display:flex; flex-wrap:wrap; align-items:center; gap:10px;">
+              <button type="submit" class="btn-amber" id="submit-article-feedback-btn">
+                ${
+                  isHi
+                    ? 'प्रतिक्रिया दर्ज करें (Submit Issue Feedback)'
+                    : 'Submit Issue Feedback for Review'
+                }
+              </button>
+              <a href="/corrections" data-nav="/corrections" class="nav-link-btn" style="border:1px solid var(--border-subtle);">
+                ${
+                  isHi
+                    ? 'सभी दर्ज रिपोर्ट और प्रतिक्रियाएं देखें (View Full Review Log)'
+                    : 'View Full Editorial Review Log (/corrections)'
+                }
+              </a>
+            </div>
+          </form>
+
+          <div style="margin-top:14px; border-top:1px solid var(--border-subtle); padding-top:10px;" data-testid="article-feedback-list">
+            <strong style="font-size:0.84rem; color:var(--text-secondary);">
+              ${
+                isHi
+                  ? `इस लेख के लिए दर्ज प्रतिक्रियाएं (${articleFeedbackList.length}):`
+                  : `Logged Issue Feedback for Review (${articleFeedbackList.length}):`
+              }
+            </strong>
+            ${
+              articleFeedbackList.length === 0
+                ? `<div style="font-size:0.8rem; color:var(--text-muted); margin-top:4px;">
+                    ${
+                      isHi
+                        ? 'इस लेख के लिए अभी तक कोई प्रतिक्रिया दर्ज नहीं की गई है।'
+                        : 'No issue feedback logged for this article yet.'
+                    }
+                  </div>`
+                : articleFeedbackList
+                    .map(
+                      (fb) => `
+                      <div style="margin-top:8px; padding:8px 10px; border-radius:6px; background:var(--navy-950); border:1px solid var(--border-subtle); font-size:0.82rem;">
+                        <div>
+                          <strong>Article ID:</strong> <code>${fb.articleId}</code> ·
+                          <strong>Issue Type:</strong> <code>${fb.issueType}</code> ·
+                          <strong>Timestamp:</strong> <code>${fb.timestamp}</code>
+                        </div>
+                        <div style="margin-top:4px; color:var(--text-primary);">
+                          <strong>Comments:</strong> ${fb.comments}
+                        </div>
+                      </div>
+                    `
+                    )
+                    .join('')
+            }
+          </div>
         </div>
       </div>
     </article>
@@ -775,7 +1289,13 @@ function renderApp(): void {
   } else if (state.route === '/sources') {
     mainContentHtml = renderSourcesLedgerPage(state.lang);
   } else if (state.route === '/corrections') {
-    mainContentHtml = renderCorrectionsPage(state.lang, items, loadCorrectionDrafts());
+    mainContentHtml = renderCorrectionsPage(
+      state.lang,
+      items,
+      loadCorrectionDrafts(),
+      loadArticleReports(),
+      loadArticleFeedback()
+    );
   } else if (state.route === '/privacy') {
     mainContentHtml = renderPrivacyAndPowerPage(
       state.lang,
@@ -807,6 +1327,18 @@ function renderApp(): void {
         </div>
 
         <div class="header-controls">
+          <button
+            type="button"
+            id="header-category-prefs-btn"
+            aria-label="${isHi ? 'पसंदीदा श्रेणियां चुनें' : 'Select Preferred Categories'}"
+          >
+            ⚙️ ${
+              isHi
+                ? `श्रेणियां (${state.categoryPrefs.selectedCategories.length})`
+                : `Categories (${state.categoryPrefs.selectedCategories.length})`
+            }
+          </button>
+
           <button
             type="button"
             id="header-city-picker-btn"
@@ -965,6 +1497,7 @@ function renderApp(): void {
     </main>
 
     ${renderCityPickerModal(state.cityModal, state.locationPref, state.lang, state.powerTier)}
+    ${renderCategoryPrefsModal()}
   `;
 
   bindEventsAndLifecycle(items);
@@ -973,8 +1506,11 @@ function renderApp(): void {
 function navigateTo(path: string): void {
   const normalized = normalizePath(path);
   state.route = normalized;
-  state.reportFormError = null;
-  state.reportFormNotice = null;
+  state.reportPromptOpen = false;
+  state.reportArticleError = null;
+  state.reportArticleNotice = null;
+  state.feedbackError = null;
+  state.feedbackNotice = null;
   window.history.pushState({}, '', normalized);
   renderApp();
   window.scrollTo({ top: 0, behavior: 'auto' });
@@ -1168,38 +1704,168 @@ function bindEventsAndLifecycle(activeArticles: ArticleRecord[]): void {
     });
   });
 
-  // Article Problem / Correction Report Form
-  const reportForm = document.getElementById('article-report-form') as HTMLFormElement | null;
-  reportForm?.addEventListener('submit', (e) => {
+  // Open Category Preferences Modal
+  const openCategoryModal = () => {
+    state.categoryModal = {
+      isOpen: true,
+      draftCategories: [...state.categoryPrefs.selectedCategories],
+      savedNotice: null,
+    };
+    renderApp();
+  };
+  document.getElementById('header-category-prefs-btn')?.addEventListener('click', openCategoryModal);
+  document.getElementById('home-customize-categories-btn')?.addEventListener('click', openCategoryModal);
+
+  const closeCategoryModal = () => {
+    state.categoryModal.isOpen = false;
+    renderApp();
+  };
+  document.getElementById('close-category-modal-btn')?.addEventListener('click', closeCategoryModal);
+  document.getElementById('cancel-category-modal-btn')?.addEventListener('click', closeCategoryModal);
+
+  // Reset Category Preferences to default
+  document.getElementById('reset-category-prefs-btn')?.addEventListener('click', () => {
+    state.categoryModal.draftCategories = [...DEFAULT_CATEGORY_PREFERENCES.selectedCategories];
+    renderApp();
+  });
+
+  // Save Category Preferences Form inside Modal
+  const categoryPrefsForm = document.getElementById('category-prefs-form') as HTMLFormElement | null;
+  categoryPrefsForm?.addEventListener('submit', (e) => {
     e.preventDefault();
-    const textarea = document.getElementById('report-reason-input') as HTMLTextAreaElement | null;
-    const rawReason = sanitizeString(textarea?.value ?? '');
-    if (rawReason.length < 8) {
-      state.reportFormError =
+    const checkedBoxes = Array.from(
+      categoryPrefsForm.querySelectorAll<HTMLInputElement>('input[name="preferredCategory"]:checked')
+    );
+    const chosen = checkedBoxes.map((cb) => cb.value as PreferredCategoryKey);
+    const saved = saveCategoryPreferences({
+      selectedCategories: chosen.length > 0 ? chosen : [...DEFAULT_CATEGORY_PREFERENCES.selectedCategories],
+      updatedAt: new Date().toISOString(),
+    });
+    state.categoryPrefs = saved;
+    state.categoryModal.isOpen = false;
+    state.categoryModal.savedNotice =
+      state.lang === 'hi'
+        ? `आपकी पसंदीदा श्रेणियां (${saved.selectedCategories.length}) डिवाइस पर सहेज ली गई हैं।`
+        : `Saved ${saved.selectedCategories.length} preferred categories to device storage.`;
+    appendBoundedLog(
+      'CATEGORY_PREFS_SAVED',
+      state.powerTier,
+      `Categories=${saved.selectedCategories.join(',')}`
+    );
+    renderApp();
+  });
+
+  // Quick-toggle category chips on the Home bar
+  document.querySelectorAll<HTMLButtonElement>('.quick-toggle-category-btn').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      const key = btn.getAttribute('data-category-key') as PreferredCategoryKey | null;
+      if (!key) return;
+      const current = new Set(state.categoryPrefs.selectedCategories);
+      if (current.has(key) && current.size > 1) {
+        current.delete(key);
+      } else {
+        current.add(key);
+      }
+      const saved = saveCategoryPreferences({
+        selectedCategories: Array.from(current),
+        updatedAt: new Date().toISOString(),
+      });
+      state.categoryPrefs = saved;
+      state.categoryModal.savedNotice =
         state.lang === 'hi'
-          ? 'कृपया कम से कम 8 अक्षरों में समस्या या सुधार का कारण लिखें।'
-          : 'Please enter a valid description (at least 8 characters) before saving.';
-      state.reportFormNotice = null;
+          ? `श्रेणी प्राथमिकता अद्यतन: ${saved.selectedCategories.map((k) => CATEGORY_META[k].labelHi).join(', ')}`
+          : `Updated preferred categories: ${saved.selectedCategories.map((k) => CATEGORY_META[k].labelEn).join(', ')}`;
+      renderApp();
+    });
+  });
+
+  // Top "Report Article" button on Article Detail page scrolls to and focuses the Report Article form
+  document.getElementById('open-report-article-btn')?.addEventListener('click', () => {
+    state.reportPromptOpen = true;
+    renderApp();
+    const sectionEl = document.getElementById('report-article-section');
+    const inputEl = document.getElementById('report-article-reason-input') as HTMLTextAreaElement | null;
+    sectionEl?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    inputEl?.focus();
+  });
+
+  // Submit Login-Free "Report Article" Form (Editorial Review)
+  const reportArticleForm = document.getElementById('report-article-form') as HTMLFormElement | null;
+  reportArticleForm?.addEventListener('submit', (e) => {
+    e.preventDefault();
+    const textarea = document.getElementById('report-article-reason-input') as HTMLTextAreaElement | null;
+    const articleId = reportArticleForm.getAttribute('data-article-id') || '';
+    const articleTitle = reportArticleForm.getAttribute('data-article-title') || 'Article';
+    const result = validateAndCreateArticleReport(
+      articleId,
+      articleTitle,
+      textarea?.value ?? '',
+      new Date().toISOString()
+    );
+
+    if (!result.valid || !result.entry) {
+      state.reportArticleError = state.lang === 'hi' ? result.errorHi ?? null : result.errorEn ?? null;
+      state.reportArticleNotice = null;
       renderApp();
       return;
     }
 
-    const articleId = reportForm.getAttribute('data-article-id') || 'unknown';
-    const articleTitle = reportForm.getAttribute('data-article-title') || 'Article';
+    saveArticleReport(result.entry);
+    appendBoundedLog(
+      'ARTICLE_REPORTED',
+      state.powerTier,
+      `Article=${result.entry.articleId} reported at ${result.entry.timestamp}`
+    );
+    state.reportArticleError = null;
+    state.reportArticleNotice =
+      state.lang === 'hi'
+        ? `रिपोर्ट दर्ज हो गई (ID: ${result.entry.articleId}, समय: ${result.entry.timestamp})। संपादकीय टीम द्वारा इसकी समीक्षा की जाएगी।`
+        : `Report logged (Article ID: ${result.entry.articleId}, Timestamp: ${result.entry.timestamp}). Reports are reviewed by the editorial team.`;
+    renderApp();
+  });
 
-    saveCorrectionDraft({
-      id: `corr-${Date.now()}`,
+  // Track issue type dropdown in Article Issue Feedback Form
+  const issueTypeSelect = document.getElementById('feedback-issue-type-select') as HTMLSelectElement | null;
+  issueTypeSelect?.addEventListener('change', () => {
+    state.feedbackSelectedType = issueTypeSelect.value as ArticleIssueType;
+  });
+
+  // Submit Structured Article Issue Feedback Form (Inaccuracy, Broken Link, Outdated Info, Attribution)
+  const feedbackForm = document.getElementById('article-feedback-form') as HTMLFormElement | null;
+  feedbackForm?.addEventListener('submit', (e) => {
+    e.preventDefault();
+    const selectEl = document.getElementById('feedback-issue-type-select') as HTMLSelectElement | null;
+    const commentsEl = document.getElementById('feedback-comments-input') as HTMLTextAreaElement | null;
+    const articleId = feedbackForm.getAttribute('data-article-id') || '';
+    const articleTitle = feedbackForm.getAttribute('data-article-title') || 'Article';
+
+    const issueTypeVal = selectEl?.value ?? state.feedbackSelectedType;
+    const result = validateAndCreateArticleFeedback(
       articleId,
       articleTitle,
-      reason: rawReason,
-      createdAt: new Date().toISOString(),
-    });
+      issueTypeVal,
+      commentsEl?.value ?? '',
+      new Date().toISOString()
+    );
 
-    state.reportFormError = null;
-    state.reportFormNotice =
+    if (!result.valid || !result.entry) {
+      state.feedbackError = state.lang === 'hi' ? result.errorHi ?? null : result.errorEn ?? null;
+      state.feedbackNotice = null;
+      renderApp();
+      return;
+    }
+
+    saveArticleFeedback(result.entry);
+    appendBoundedLog(
+      'ARTICLE_FEEDBACK_LOGGED',
+      state.powerTier,
+      `Article=${result.entry.articleId}, Type=${result.entry.issueType}`
+    );
+    state.feedbackError = null;
+    state.feedbackNotice =
       state.lang === 'hi'
-        ? 'आपकी सुधार रिपोर्ट डिवाइस पर सुरक्षित रूप से दर्ज हो गई है। आप इसे "संशोधन (Corrections)" पृष्ठ पर देख सकते हैं।'
-        : 'Correction report packet saved on-device. View it anytime on the Corrections page.';
+        ? `प्रतिक्रिया दर्ज की गई (लेख ID: ${result.entry.articleId}, प्रकार: ${result.entry.issueType})। समीक्षा के लिए उपलब्ध।`
+        : `Issue feedback logged (Article ID: ${result.entry.articleId}, Issue Type: ${result.entry.issueType}) and made available for review.`;
     renderApp();
   });
 
